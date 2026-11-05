@@ -1,0 +1,75 @@
+services:
+  # PostgreSQL Database for Nexus application state
+  db:
+    image: postgres:16-alpine
+    container_name: nexus-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Database password must be set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nexus-network
+
+  # Apache Guacamole Proxy Daemon (guacd)
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: nexus-guacd
+    restart: unless-stopped
+    ports:
+      - "4822:4822"
+    networks:
+      - nexus-network
+
+  # Cloud4Green Nexus Backend API Service (FastAPI + pyVmomi + Guacamole Tunnel)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-nexus}"
+      GUACD_HOST: "guacd"
+      GUACD_PORT: "4822"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      guacd:
+        condition: service_started
+    ports:
+      - "${PORT:-8000}:8000"
+    networks:
+      - nexus-network
+
+  # Cloud4Green Nexus Frontend Web Application (React + Nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexus-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3001}:80"
+    depends_on:
+      - backend
+    networks:
+      - nexus-network
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  nexus-network:
+    driver: bridge
