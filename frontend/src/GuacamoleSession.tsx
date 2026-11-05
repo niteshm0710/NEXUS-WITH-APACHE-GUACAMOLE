@@ -387,3 +387,4 @@ export const GuacamoleSession: React.FC<GuacamoleSessionProps> = ({ vm, onClose 
     </div>
   );
 };
+

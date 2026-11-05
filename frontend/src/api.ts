@@ -191,3 +191,4 @@ export async function api<T = any>(path: string, method = "GET", body?: unknown)
 
   return res.json();
 }
+

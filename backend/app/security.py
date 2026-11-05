@@ -70,3 +70,4 @@ def rate_limited(key: str, limit: int = 10, window: int = 60) -> bool:
     history.append(now_ts)
     _hits[key] = history
     return len(history) > limit
+

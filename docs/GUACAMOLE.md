@@ -93,3 +93,4 @@ User Browser                  Nexus Backend API              guacd (Port 4822)  
 1. **No Credentials in Frontend**: Passwords, private keys, and passphrases are NEVER returned by any API endpoint or sent to client browsers.
 2. **Anti-IDOR Enforcement**: Every remote connection attempt performs database authorization checks. If an attacker attempts to connect to `/api/v1/vms/999/guac-ws`, the backend closes the WebSocket with error code `4404` or `4401`.
 3. **Internal Network Isolation**: `guacd` communicates with target VMs inside the local network or VLAN. The target VM's RDP/SSH ports do not need to be exposed to the public internet.
+

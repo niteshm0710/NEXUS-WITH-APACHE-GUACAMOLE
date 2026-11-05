@@ -41,3 +41,4 @@ BRAND = {
     "footer": "Powered by Cloud4green Technologies & Apache Guacamole",
     "version": "2.0.0"
 }
+

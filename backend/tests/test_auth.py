@@ -34,3 +34,4 @@ def test_auth_me(client, user1_headers):
 def test_unauthorized_access(client):
     r = client.get("/api/v1/vms")
     assert r.status_code == 401
+

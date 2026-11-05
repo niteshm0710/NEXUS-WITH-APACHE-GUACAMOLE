@@ -186,3 +186,4 @@ async def test_guacd(host: str, port: int, timeout: int = 5) -> dict:
         return {"status": "connected", "host": host, "port": port, "healthy": True}
     except Exception as e:
         return {"status": "unreachable", "host": host, "port": port, "healthy": False, "error": str(e)}
+

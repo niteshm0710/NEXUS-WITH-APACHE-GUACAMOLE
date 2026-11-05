@@ -136,3 +136,4 @@ def test_vm_deduplication(db):
     updated = db.query(m.VirtualMachine).filter_by(uuid=uuid).first()
     assert updated.name == "Sync Target VM Renamed"
     assert updated.power_state == "off"
+

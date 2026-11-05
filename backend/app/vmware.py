@@ -273,3 +273,4 @@ class PyVmomiProvider:
                 Disconnect(si)
             except Exception:
                 pass
+

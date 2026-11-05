@@ -73,3 +73,4 @@ Expected output:
 8. Log in as a standard user:
    - Verify you see only your assigned VMs.
    - Click the green **CONNECT** button to start your browser-based remote session!
+

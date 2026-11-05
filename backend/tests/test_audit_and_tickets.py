@@ -50,3 +50,4 @@ def test_audit_logs_contain_real_system_actions(client, admin_headers):
     for log in logs:
         assert "fake" not in log["action"].lower()
         assert "dummy" not in log["action"].lower()
+

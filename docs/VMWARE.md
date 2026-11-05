@@ -33,3 +33,4 @@ Cloud4Green Nexus integrates with VMware vSphere 7.x, 8.x, and standalone ESXi h
 4. Toggle **Verify TLS** (leave checked for production hosts with valid certificates; uncheck if connecting to internal development hosts with self-signed certificates).
 5. Click **Test & Save Connection**.
 6. Click **Sync VMware Inventory** to synchronize all virtual machines into Cloud4Green Nexus.
+

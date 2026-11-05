@@ -98,3 +98,4 @@ def user2_headers(db):
     user = db.query(m.User).filter_by(email="user2@nexus.test").first()
     token = sec.make_access(user.id, "user")
     return {"Authorization": f"Bearer {token}"}
+

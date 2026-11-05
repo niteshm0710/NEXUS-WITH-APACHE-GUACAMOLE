@@ -94,3 +94,4 @@ Cloud4Green Nexus with Apache Guacamole is an enterprise-grade virtualization an
 - Persistent relational database with indexed tables and foreign key constraints.
 - Prevents VM record duplication across synchronization runs using unique hardware UUIDs.
 - Enforces unique user assignments via composite unique keys (`user_id`, `vm_id`).
+
