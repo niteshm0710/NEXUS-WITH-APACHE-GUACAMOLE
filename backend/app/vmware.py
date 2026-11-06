@@ -107,57 +107,85 @@ class PyVmomiProvider:
         except ImportError:
             raise VMwareError("pyVmomi library is not installed in the backend environment.")
 
+        host = self.host
+        port = 443
+        if ":" in host:
+            parts = host.split(":", 1)
+            host = parts[0]
+            try:
+                port = int(parts[1])
+            except ValueError:
+                port = 443
+
         ctx = ssl.create_default_context() if self.verify else ssl._create_unverified_context()
+        log.info("Connecting to VMware vCenter/ESXi at %s:%d (user=%s, verify_tls=%s)...", host, port, self.user, self.verify)
         try:
-            return SmartConnect(host=self.host, user=self.user, pwd=self.pwd, sslContext=ctx)
+            return SmartConnect(host=host, port=port, user=self.user, pwd=self.pwd, sslContext=ctx)
         except vim.fault.InvalidLogin:
+            log.warning("VMware login failed for host=%s:%d user=%s", host, port, self.user)
             raise VMwareError("Authentication failed: invalid vCenter or ESXi username or password.")
         except vim.fault.NoPermission as e:
+            log.warning("VMware permission denied for host=%s:%d user=%s: %s", host, port, self.user, getattr(e, 'msg', ''))
             raise VMwareError(f"Permission denied on VMware host: {getattr(e, 'msg', 'insufficient privileges')}.")
         except (ssl.SSLCertVerificationError, ssl.SSLError) as e:
             err_str = str(e)
+            log.warning("VMware TLS handshake error for host=%s:%d: %s", host, port, err_str)
             if "certificate verify failed" in err_str.lower() or isinstance(e, ssl.SSLCertVerificationError):
                 raise VMwareError(
-                    f"TLS certificate verification failed for '{self.host}'. "
+                    f"TLS certificate verification failed for '{host}:{port}'. "
                     f"The host uses a self-signed or untrusted certificate. "
                     f"Uncheck 'Verify TLS' if connecting to a development or self-signed host."
                 )
-            raise VMwareError(f"TLS/SSL handshake failed with '{self.host}': {self._sanitize(err_str)}.")
-        except socket.gaierror:
+            raise VMwareError(f"TLS/SSL handshake failed with '{host}:{port}': {self._sanitize(err_str)}.")
+        except socket.gaierror as e:
+            log.warning("VMware DNS resolution failed for host=%s: %s", host, e)
             raise VMwareError(
-                f"DNS resolution failed: unable to resolve hostname '{self.host}'. "
+                f"DNS resolution failed: unable to resolve hostname '{host}'. "
                 f"Please verify the hostname in your DNS server or local /etc/hosts file."
             )
-        except ConnectionRefusedError:
+        except ConnectionRefusedError as e:
+            log.warning("VMware connection refused for host=%s:%d: %s", host, port, e)
             raise VMwareError(
-                f"Connection refused: host '{self.host}' is reachable, but port 443 is closed or not accepting connections."
+                f"Connection refused: host '{host}' is reachable, but port {port} is closed or not accepting connections."
             )
-        except (socket.timeout, TimeoutError):
+        except (socket.timeout, TimeoutError) as e:
+            log.warning("VMware connection timeout for host=%s:%d: %s", host, port, e)
             raise VMwareError(
-                f"Connection timed out: host '{self.host}:443' did not respond within the timeout window."
+                f"Connection timed out: host '{host}:{port}' did not respond within the timeout window."
+            )
+        except PermissionError as e:
+            log.error(
+                "VMware socket connection blocked by system permission or OS sandbox for %s:%d: %s (errno=%s)",
+                host, port, e, getattr(e, "errno", None), exc_info=True
+            )
+            raise VMwareError(
+                f"Network error connecting to '{host}:{port}': Operation not permitted (PermissionError errno={getattr(e, 'errno', None)}). "
+                f"The backend process is restricted from opening outbound network sockets by an OS sandbox, firewall rule, or container security profile."
             )
         except OSError as e:
+            log.error("VMware OS network error for host=%s:%d: %s (errno=%s)", host, port, e, getattr(e, "errno", None), exc_info=True)
             if getattr(e, "errno", None) == 65 or "No route to host" in str(e):
                 raise VMwareError(
-                    f"No route to host '{self.host}': the host IP is not reachable on the local network or subnet."
+                    f"No route to host '{host}': the host IP is not reachable on the local network or subnet."
                 )
             err_str = self._sanitize(str(e))
             if "certificate verify failed" in err_str.lower():
                 raise VMwareError(
-                    f"TLS certificate verification failed for '{self.host}'. "
+                    f"TLS certificate verification failed for '{host}:{port}'. "
                     f"The host uses a self-signed or untrusted certificate. "
                     f"Uncheck 'Verify TLS' if connecting to a development or self-signed host."
                 )
-            raise VMwareError(f"Network error connecting to '{self.host}:443': {getattr(e, 'strerror', None) or err_str}.")
+            raise VMwareError(f"Network error connecting to '{host}:{port}': {getattr(e, 'strerror', None) or err_str}.")
         except Exception as e:
+            log.exception("Unexpected error connecting to VMware host %s:%d: %s", host, port, e)
             err = self._sanitize(str(e))
             if "certificate verify failed" in err.lower():
                 raise VMwareError(
-                    f"TLS certificate verification failed for '{self.host}'. "
+                    f"TLS certificate verification failed for '{host}:{port}'. "
                     f"The host uses a self-signed or untrusted certificate. "
                     f"Uncheck 'Verify TLS' if connecting to a development or self-signed host."
                 )
-            raise VMwareError(f"Failed to connect to VMware host '{self.host}': {err}")
+            raise VMwareError(f"Failed to connect to VMware host '{host}:{port}': {err}")
 
     def test(self) -> str:
         """Verify credentials and return vCenter / ESXi API version."""
