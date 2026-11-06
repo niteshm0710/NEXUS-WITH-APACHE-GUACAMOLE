@@ -879,6 +879,9 @@ export default function App() {
                 const isRunning = vm.power_state === "on";
                 const isConfigured = vm.remote_access?.configured ?? false;
                 const proto = vm.remote_access?.protocol?.toUpperCase();
+                const isOrphaned = vm.connection_state === "orphaned" || vm.connection_state === "inaccessible" || vm.connection_state === "invalid";
+                const isHostOffline = vm.connection_state === "host_disconnected";
+                const isActionable = !isOrphaned && !isHostOffline;
 
                 return (
                   <div
@@ -902,20 +905,32 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Power Badge */}
+                        {/* Power & Health Badge */}
                         <div className="flex items-center space-x-1.5">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              isRunning ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
-                            }`}
-                          />
-                          <span
-                            className={`text-xs font-medium uppercase tracking-wider ${
-                              isRunning ? "text-emerald-400" : "text-slate-500"
-                            }`}
-                          >
-                            {vm.power_state}
-                          </span>
+                          {isOrphaned ? (
+                            <span className="text-[10px] font-semibold tracking-wider uppercase text-amber-400 bg-amber-950/80 border border-amber-800/80 px-2 py-0.5 rounded" title="Virtual machine files missing on datastore (orphaned in vCenter)">
+                              Orphaned
+                            </span>
+                          ) : isHostOffline ? (
+                            <span className="text-[10px] font-semibold tracking-wider uppercase text-rose-400 bg-rose-950/80 border border-rose-800/80 px-2 py-0.5 rounded" title="ESXi host is offline / disconnected from vCenter">
+                              Host Offline
+                            </span>
+                          ) : (
+                            <>
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  isRunning ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
+                                }`}
+                              />
+                              <span
+                                className={`text-xs font-medium uppercase tracking-wider ${
+                                  isRunning ? "text-emerald-400" : "text-slate-500"
+                                }`}
+                              >
+                                {vm.power_state}
+                              </span>
+                            </>
+                          )}
                         </div>
                       </div>
 
@@ -981,6 +996,14 @@ export default function App() {
                           <MonitorPlay className="w-4 h-4" />
                           <span>CONNECT ({proto})</span>
                         </button>
+                      ) : isOrphaned ? (
+                        <div className="flex-1 py-2 px-3 rounded-lg bg-amber-950/20 text-amber-500/80 text-xs text-center border border-amber-900/30">
+                          Orphaned in vCenter
+                        </div>
+                      ) : isHostOffline ? (
+                        <div className="flex-1 py-2 px-3 rounded-lg bg-rose-950/20 text-rose-500/80 text-xs text-center border border-rose-900/30">
+                          Host Offline
+                        </div>
                       ) : !isRunning ? (
                         <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
                           Power on to connect
@@ -993,7 +1016,15 @@ export default function App() {
 
                       {/* Power Controls */}
                       <div className="flex items-center space-x-1">
-                        {isRunning ? (
+                        {!isActionable ? (
+                          <button
+                            disabled
+                            className="p-2 rounded-lg bg-slate-900 text-slate-600 border border-slate-800/80 cursor-not-allowed opacity-40"
+                            title={isOrphaned ? "Power operation unavailable: VM is orphaned in vCenter" : "Power operation unavailable: ESXi host is disconnected"}
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                          </button>
+                        ) : isRunning ? (
                           <button
                             onClick={() => handlePower(vm.id, "stop")}
                             className="p-2 rounded-lg bg-slate-800 hover:bg-rose-950/80 hover:text-rose-400 text-slate-400 border border-slate-700/80 transition"

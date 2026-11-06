@@ -27,6 +27,7 @@ export interface VM {
   ip_address: string;
   host: string;
   datastore: string;
+  connection_state?: "connected" | "orphaned" | "inaccessible" | "invalid" | "host_disconnected" | string;
   source?: string;
   remote_access?: RemoteAccessMeta;
 }

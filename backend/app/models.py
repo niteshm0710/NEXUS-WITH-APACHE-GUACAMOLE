@@ -37,6 +37,7 @@ class VirtualMachine(Base):
     ip_address: Mapped[str] = mapped_column(String(64), default="")
     host: Mapped[str] = mapped_column(String(255), default="")
     datastore: Mapped[str] = mapped_column(String(255), default="")
+    connection_state: Mapped[str] = mapped_column(String(32), default="connected")
     source: Mapped[str] = mapped_column(String(16), default="vmware")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

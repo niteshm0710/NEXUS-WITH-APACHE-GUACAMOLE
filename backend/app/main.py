@@ -201,6 +201,7 @@ def vm_out(v: m.VirtualMachine, include_remote_meta: bool = True):
         "ip_address": v.ip_address,
         "host": v.host,
         "datastore": v.datastore,
+        "connection_state": getattr(v, "connection_state", "connected") or "connected",
         "source": v.source,
         "created_at": to_utc_iso(v.created_at),
         "updated_at": to_utc_iso(v.updated_at),
@@ -945,6 +946,7 @@ def do_sync(db: Session, a: m.User, req: Request):
         v.ip_address = i.ip_address
         v.host = i.host
         v.datastore = i.datastore
+        v.connection_state = getattr(i, "connection_state", "connected")
 
     c = db.scalar(select(m.VmwareConnection).order_by(m.VmwareConnection.id.desc()))
     if c:

@@ -20,6 +20,7 @@ class VMInfo:
     ip_address: str
     host: str
     datastore: str
+    connection_state: str = "connected"
 
 class VMwareError(Exception):
     """Clean, user-safe error message from VMware operations."""
@@ -164,8 +165,22 @@ class PyVmomiProvider:
                             ip_address = str(guest.ipAddress).strip()
 
                         esxi_host = ""
-                        if runtime and getattr(runtime, "host", None):
-                            esxi_host = str(getattr(runtime.host, "name", ""))
+                        host_obj = getattr(runtime, "host", None) if runtime else None
+                        if host_obj:
+                            esxi_host = str(getattr(host_obj, "name", ""))
+
+                        # Detect connection state and ESXi host responsiveness
+                        conn_state = getattr(runtime, "connectionState", "connected") if runtime else "connected"
+                        host_state = "connected"
+                        if host_obj and getattr(host_obj, "runtime", None):
+                            host_state = getattr(host_obj.runtime, "connectionState", "connected")
+
+                        if conn_state in ("orphaned", "inaccessible", "invalid"):
+                            effective_conn = conn_state
+                        elif host_state != "connected":
+                            effective_conn = "host_disconnected"
+                        else:
+                            effective_conn = "connected"
 
                         datastore = ""
                         ds_list = getattr(vm, "datastore", [])
@@ -182,7 +197,8 @@ class PyVmomiProvider:
                             storage_gb=storage_gb,
                             ip_address=ip_address,
                             host=esxi_host,
-                            datastore=datastore
+                            datastore=datastore,
+                            connection_state=effective_conn,
                         ))
                     except Exception as vm_err:
                         log.warning(f"Skipping VM parsing error: {vm_err}")
@@ -208,10 +224,29 @@ class PyVmomiProvider:
         """Execute real power operation on VMware host."""
         from pyVim.connect import Disconnect
         from pyVim.task import WaitForTask
-        from pyVmomi import vim
+        from pyVmomi import vim, vmodl
         si = self._connect()
         try:
             vm = self._find(si, vm_row.uuid)
+
+            # Pre-check VM connection state (orphaned, inaccessible, invalid)
+            conn_state = getattr(vm.runtime, "connectionState", "connected")
+            if conn_state in ("orphaned", "inaccessible", "invalid"):
+                raise VMwareError(
+                    f"Cannot perform power operation: VM '{vm_row.name}' is marked '{conn_state}' in vCenter "
+                    f"(virtual machine files do not exist on the datastore)."
+                )
+
+            # Pre-check ESXi host connection state
+            host_obj = getattr(vm.runtime, "host", None)
+            if host_obj and getattr(host_obj, "runtime", None):
+                host_state = getattr(host_obj.runtime, "connectionState", "connected")
+                if host_state != "connected":
+                    host_name = getattr(host_obj, "name", "ESXi host")
+                    raise VMwareError(
+                        f"Cannot perform power operation: ESXi host '{host_name}' is currently offline/disconnected from vCenter."
+                    )
+
             st = getattr(vm.runtime, "powerState", "")
             if action == "start":
                 if st == "poweredOn":
@@ -230,12 +265,20 @@ class PyVmomiProvider:
             if result != "success" and hasattr(task.info, "error") and task.info.error:
                 raise VMwareError(f"Power {action} task failed: {task.info.error.msg}")
             return "off" if action == "stop" else "on"
+        except vim.fault.InvalidState as e:
+            msg = getattr(e, "msg", None) or "The operation is not allowed in the current state."
+            raise VMwareError(f"VMware power task rejected: {msg}")
         except vim.fault.VimFault as e:
-            raise VMwareError(f"VMware power task rejected: {getattr(e, 'msg', str(e))}")
+            msg = getattr(e, "msg", None) or str(e)
+            raise VMwareError(f"VMware power task rejected: {msg}")
+        except vmodl.MethodFault as e:
+            msg = getattr(e, "msg", None) or str(e)
+            raise VMwareError(f"VMware task failed: {msg}")
         except VMwareError:
             raise
         except Exception as e:
-            raise VMwareError(f"Power operation failed: {self._sanitize(str(e))}")
+            msg = getattr(e, "msg", None) or str(e)
+            raise VMwareError(f"Power operation failed: {self._sanitize(msg)}")
         finally:
             try:
                 Disconnect(si)
