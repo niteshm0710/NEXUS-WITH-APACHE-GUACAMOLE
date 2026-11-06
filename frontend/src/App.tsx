@@ -46,6 +46,12 @@ import {
   Sliders,
   FolderKey,
   ShieldAlert,
+  UserPlus,
+  Edit2,
+  Trash2,
+  UserCheck,
+  UserX,
+  FolderPlus,
 } from "lucide-react";
 import {
   api,
@@ -68,6 +74,13 @@ import {
   updateConnectionProfile,
   deleteConnectionProfile,
   assignVmConnectionProfile,
+  getUsers,
+  createUser,
+  updateUser,
+  disableUser,
+  getAssignments,
+  createAssignments,
+  revokeAssignment,
 } from "./api";
 import { GuacamoleSession } from "./GuacamoleSession";
 
@@ -314,6 +327,39 @@ export default function App() {
   const [profilePrivateKey, setProfilePrivateKey] = useState("");
   const [profileSaveLoading, setProfileSaveLoading] = useState(false);
   const [profileModalMsg, setProfileModalMsg] = useState("");
+
+  // User Management State
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [addUserForm, setAddUserForm] = useState({
+    full_name: "",
+    email: "",
+    role: "user",
+    password: "",
+  });
+  const [addUserLoading, setAddUserLoading] = useState(false);
+  const [addUserError, setAddUserError] = useState("");
+
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editUserForm, setEditUserForm] = useState({
+    full_name: "",
+    role: "user",
+    password: "",
+    is_active: true,
+  });
+  const [editUserLoading, setEditUserLoading] = useState(false);
+  const [editUserError, setEditUserError] = useState("");
+
+  const [userManageModal, setUserManageModal] = useState<User | null>(null);
+  const [userManageSelectedVmIds, setUserManageSelectedVmIds] = useState<number[]>([]);
+  const [userManageLoading, setUserManageLoading] = useState(false);
+
+  // VM Assignment Creator Panel State
+  const [assignTargetUid, setAssignTargetUid] = useState<number>(0);
+  const [assignSelectedVmIds, setAssignSelectedVmIds] = useState<number[]>([]);
+  const [assignVmSearch, setAssignVmSearch] = useState("");
+  const [assignSubmitLoading, setAssignSubmitLoading] = useState(false);
+  const [assignmentSearch, setAssignmentSearch] = useState("");
+  const [assignmentUserFilter, setAssignmentUserFilter] = useState<string>("all");
 
   // Sync state
   const [syncLoading, setSyncLoading] = useState(false);
@@ -636,6 +682,162 @@ export default function App() {
     }
   };
 
+  // User Management Actions
+  const handleAddUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addUserForm.full_name.trim() || !addUserForm.email.trim()) {
+      setAddUserError("Full name and email are required.");
+      return;
+    }
+    if (addUserForm.password.length < 12) {
+      setAddUserError("Password must be at least 12 characters long.");
+      return;
+    }
+    setAddUserLoading(true);
+    setAddUserError("");
+    try {
+      await createUser({
+        full_name: addUserForm.full_name.trim(),
+        email: addUserForm.email.trim().toLowerCase(),
+        role: addUserForm.role,
+        password: addUserForm.password,
+      });
+      showBanner(`User account created for ${addUserForm.email}.`);
+      setShowAddUserModal(false);
+      setAddUserForm({ full_name: "", email: "", role: "user", password: "" });
+      refreshData();
+    } catch (err: any) {
+      setAddUserError(err.message || "Failed to create user.");
+    } finally {
+      setAddUserLoading(false);
+    }
+  };
+
+  const openEditUserModal = (u: User) => {
+    setEditingUser(u);
+    setEditUserForm({
+      full_name: u.full_name,
+      role: u.role,
+      password: "",
+      is_active: u.is_active,
+    });
+    setEditUserError("");
+  };
+
+  const handleSaveEditUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    if (editUserForm.password && editUserForm.password.length < 12) {
+      setEditUserError("Password must be at least 12 characters long if changed.");
+      return;
+    }
+    setEditUserLoading(true);
+    setEditUserError("");
+    try {
+      const payload: any = {
+        full_name: editUserForm.full_name.trim(),
+        role: editUserForm.role,
+        is_active: editUserForm.is_active,
+      };
+      if (editUserForm.password.trim()) {
+        payload.password = editUserForm.password.trim();
+      }
+      await updateUser(editingUser.id, payload);
+      showBanner(`User ${editingUser.email} updated successfully.`);
+      setEditingUser(null);
+      refreshData();
+    } catch (err: any) {
+      setEditUserError(err.message || "Failed to update user.");
+    } finally {
+      setEditUserLoading(false);
+    }
+  };
+
+  const handleToggleUserStatus = async (u: User) => {
+    if (u.id === currentUser?.id) {
+      showBanner("Cannot disable your own administrator account.", "error");
+      return;
+    }
+    try {
+      if (u.is_active) {
+        if (!window.confirm(`Disable access for ${u.full_name} (${u.email})?`)) return;
+        await disableUser(u.id);
+        showBanner(`User account for ${u.email} disabled.`);
+      } else {
+        await updateUser(u.id, { is_active: true });
+        showBanner(`User account for ${u.email} re-enabled.`);
+      }
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Action failed.", "error");
+    }
+  };
+
+  // Direct User VM Management Modal Handlers
+  const openUserVmModal = (u: User) => {
+    setUserManageModal(u);
+    setUserManageSelectedVmIds([]);
+  };
+
+  const handleUserModalAssign = async () => {
+    if (!userManageModal || !userManageSelectedVmIds.length) return;
+    setUserManageLoading(true);
+    try {
+      await createAssignments(userManageModal.id, userManageSelectedVmIds);
+      showBanner(`Assigned ${userManageSelectedVmIds.length} VM(s) to ${userManageModal.full_name}.`);
+      setUserManageSelectedVmIds([]);
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Failed to assign VMs.", "error");
+    } finally {
+      setUserManageLoading(false);
+    }
+  };
+
+  const handleUserModalRevoke = async (aid: number, vmName?: string) => {
+    try {
+      await revokeAssignment(aid);
+      showBanner(`Assignment revoked for ${vmName || "VM"}.`);
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Failed to revoke assignment.", "error");
+    }
+  };
+
+  // VM Assignments Tab Actions
+  const handleCreateAssignments = async () => {
+    if (!assignTargetUid) {
+      showBanner("Please select a target user.", "error");
+      return;
+    }
+    if (!assignSelectedVmIds.length) {
+      showBanner("Please select at least one virtual machine.", "error");
+      return;
+    }
+    setAssignSubmitLoading(true);
+    try {
+      const res = await createAssignments(assignTargetUid, assignSelectedVmIds);
+      showBanner(res.message || `Assigned ${assignSelectedVmIds.length} VM(s) successfully.`);
+      setAssignSelectedVmIds([]);
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Failed to assign virtual machines.", "error");
+    } finally {
+      setAssignSubmitLoading(false);
+    }
+  };
+
+  const handleRevokeAssignment = async (aid: number, vmName?: string) => {
+    if (!window.confirm(`Revoke assignment for ${vmName || "VM"}?`)) return;
+    try {
+      await revokeAssignment(aid);
+      showBanner(`Assignment revoked for ${vmName || "VM"}.`);
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Failed to revoke assignment.", "error");
+    }
+  };
+
   // Filtered VM list
   const filteredVms = useMemo(() => {
     return vms.filter((v) => {
@@ -647,6 +849,31 @@ export default function App() {
       return matchSearch && matchStatus;
     });
   }, [vms, searchQuery, statusFilter]);
+
+  // Filtered assignments list
+  const filteredAssignments = useMemo(() => {
+    return assignments.filter((a) => {
+      const matchSearch =
+        (a.user_name || "").toLowerCase().includes(assignmentSearch.toLowerCase()) ||
+        (a.user_email || "").toLowerCase().includes(assignmentSearch.toLowerCase()) ||
+        (a.vm_name || "").toLowerCase().includes(assignmentSearch.toLowerCase());
+      const matchUser =
+        assignmentUserFilter === "all" || String(a.user_id) === assignmentUserFilter;
+      return matchSearch && matchUser;
+    });
+  }, [assignments, assignmentSearch, assignmentUserFilter]);
+
+  // Filtered assignable VMs for creator panel
+  const assignableVms = useMemo(() => {
+    return vms.filter((v) => {
+      if (!assignVmSearch) return true;
+      return (
+        v.name.toLowerCase().includes(assignVmSearch.toLowerCase()) ||
+        v.guest_os.toLowerCase().includes(assignVmSearch.toLowerCase()) ||
+        v.ip_address.includes(assignVmSearch)
+      );
+    });
+  }, [vms, assignVmSearch]);
 
   // Loading screen
   if (loadingInitial) {
@@ -1169,6 +1396,25 @@ export default function App() {
                             </span>
                           )}
                         </div>
+
+                        {currentUser?.role === "admin" && (
+                          <div className="flex justify-between items-center text-xs pt-1.5 border-t border-slate-800/50">
+                            <span className="text-slate-500 flex items-center space-x-1">
+                              <Users className="w-3 h-3 text-slate-500" />
+                              <span>Assigned To:</span>
+                            </span>
+                            {vm.assigned_users && vm.assigned_users.length > 0 ? (
+                              <span
+                                className="text-emerald-400 font-medium text-[11px] truncate max-w-[190px]"
+                                title={vm.assigned_users.map((u) => `${u.full_name} (${u.email})`).join(", ")}
+                              >
+                                {vm.assigned_users.map((u) => u.full_name || u.email).join(", ")}
+                              </span>
+                            ) : (
+                              <span className="text-slate-600 text-[11px] italic">Unassigned</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1528,78 +1774,295 @@ export default function App() {
             TAB: ASSIGNMENTS (ADMIN ONLY)
         ========================================================================= */}
         {activeTab === "assignments" && currentUser.role === "admin" && (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-white">VM User Assignments</h2>
-                <p className="text-xs text-slate-400">
-                  Standard users can ONLY see and access VMs that are explicitly assigned to them.
-                </p>
+          <div className="space-y-6">
+            {/* Creator Panel */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-4">
+                <div>
+                  <h2 className="text-base font-semibold text-white flex items-center space-x-2">
+                    <FolderPlus className="w-5 h-5 text-emerald-400" />
+                    <span>Assign Virtual Workstations to Users</span>
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Select an active user and check the VMware virtual machines they are authorized to access.
+                  </p>
+                </div>
+                <div className="text-xs text-slate-400">
+                  <span className="font-semibold text-emerald-400">{vms.length}</span> VMs available in inventory
+                </div>
               </div>
-            </div>
 
-            {assignments.length === 0 ? (
-              <div className="py-12 text-center">
-                <Link2 className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-                <p className="text-sm text-slate-300 font-medium">No active assignments yet.</p>
-                <p className="text-xs text-slate-500 mt-1">Assign virtual machines to users to grant browser access.</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs text-slate-300">
-                  <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
-                    <tr>
-                      <th className="py-3 px-4">User</th>
-                      <th className="py-3 px-4">Virtual Machine</th>
-                      <th className="py-3 px-4">Power</th>
-                      <th className="py-3 px-4">Remote Protocol</th>
-                      <th className="py-3 px-4">Assigned At</th>
-                      <th className="py-3 px-4 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {assignments.map((asg) => (
-                      <tr key={asg.id} className="hover:bg-slate-800/30">
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-white">{asg.user_name}</div>
-                          <div className="text-slate-500">{asg.user_email}</div>
-                        </td>
-                        <td className="py-3 px-4 font-medium text-slate-200">{asg.vm_name}</td>
-                        <td className="py-3 px-4">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                              asg.vm_power_state === "on" ? "text-emerald-400 bg-emerald-950" : "text-slate-400 bg-slate-800"
+              {vms.length === 0 ? (
+                <div className="py-8 text-center bg-slate-950/60 rounded-xl border border-dashed border-slate-800">
+                  <Layers className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                  <p className="text-xs text-slate-400">No virtual machines available in inventory.</p>
+                  <button
+                    onClick={handleSync}
+                    className="mt-3 px-3 py-1.5 rounded-lg bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 text-xs font-semibold hover:bg-emerald-600/30 transition"
+                  >
+                    Sync VMware Inventory
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {/* Target User Selector */}
+                  <div className="max-w-md">
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                      Target User Account <span className="text-rose-400">*</span>
+                    </label>
+                    <select
+                      value={assignTargetUid}
+                      onChange={(e) => setAssignTargetUid(+e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value={0}>Choose a user account...</option>
+                      {usersList
+                        .filter((u) => u.is_active)
+                        .map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.full_name} ({u.email}) — {u.role === "admin" ? "Administrator" : "Standard User"}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Multi-Select VM Grid with Search */}
+                  <div>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                      <label className="text-xs font-semibold text-slate-300">
+                        Available Virtual Machines ({assignableVms.length})
+                      </label>
+                      <div className="flex items-center space-x-2">
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            placeholder="Filter by VM name or IP..."
+                            value={assignVmSearch}
+                            onChange={(e) => setAssignVmSearch(e.target.value)}
+                            className="pl-8 pr-3 py-1 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-52"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const ids = assignableVms.map((v) => v.id);
+                            setAssignSelectedVmIds(ids);
+                          }}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium transition"
+                        >
+                          Select All
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAssignSelectedVmIds([])}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 text-[11px] font-medium transition"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-64 overflow-y-auto p-2 bg-slate-950/70 rounded-xl border border-slate-800">
+                      {assignableVms.map((vm) => {
+                        const isChecked = assignSelectedVmIds.includes(vm.id);
+                        const os = detectOs(vm.guest_os);
+                        const isAssigned = (vm.assigned_users && vm.assigned_users.length > 0) || false;
+
+                        return (
+                          <label
+                            key={vm.id}
+                            className={`flex items-start space-x-2.5 p-2.5 rounded-lg border cursor-pointer text-xs transition select-none ${
+                              isChecked
+                                ? "border-emerald-500/80 bg-emerald-950/30 text-white shadow-sm"
+                                : "border-slate-800/80 hover:bg-slate-900/80 text-slate-300"
                             }`}
                           >
-                            {asg.vm_power_state}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="font-mono text-slate-300">{asg.vm_remote_protocol?.toUpperCase() || "None"}</span>
-                        </td>
-                        <td className="py-3 px-4 text-slate-400">{formatDateTime(asg.created_at)}</td>
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            onClick={async () => {
-                              try {
-                                await api(`/admin/assignments/${asg.id}`, "DELETE");
-                                showBanner("Assignment revoked.");
-                                refreshData();
-                              } catch (err: any) {
-                                showBanner(err.message, "error");
-                              }
-                            }}
-                            className="px-2.5 py-1 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 transition"
-                          >
-                            Revoke
-                          </button>
-                        </td>
-                      </tr>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setAssignSelectedVmIds([...assignSelectedVmIds, vm.id]);
+                                } else {
+                                  setAssignSelectedVmIds(assignSelectedVmIds.filter((id) => id !== vm.id));
+                                }
+                              }}
+                              className="mt-0.5 rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center space-x-1.5">
+                                <os.icon className={`w-3.5 h-3.5 shrink-0 ${os.iconColor}`} />
+                                <span className="font-semibold text-xs truncate text-white">{vm.name}</span>
+                              </div>
+                              <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                                {os.label} · {Math.round(vm.ram_mb / 1024)}GB RAM · {vm.cpu} vCPU
+                              </div>
+                              <div className="flex items-center space-x-2 mt-1">
+                                <span className={`text-[10px] font-mono ${vm.ip_address ? "text-emerald-400/90" : "text-slate-500"}`}>
+                                  {vm.ip_address || "No IP"}
+                                </span>
+                                {isAssigned && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-950/80 text-purple-300 border border-purple-800/80 truncate max-w-[120px]" title={vm.assigned_users?.map(u => u.full_name || u.email).join(", ")}>
+                                    Assigned ({vm.assigned_users?.length})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Submission Row */}
+                  <div className="flex items-center justify-between pt-2">
+                    <span className="text-xs text-slate-400">
+                      {assignSelectedVmIds.length} VM(s) selected for assignment
+                    </span>
+                    <button
+                      type="button"
+                      disabled={assignSubmitLoading || !assignTargetUid || assignSelectedVmIds.length === 0}
+                      onClick={handleCreateAssignments}
+                      className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-2 disabled:opacity-50 shadow-md shadow-emerald-950/50"
+                    >
+                      {assignSubmitLoading ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5" />
+                      )}
+                      <span>Confirm Assignment</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Existing Active Assignments Table */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-semibold text-white flex items-center space-x-2">
+                    <Link2 className="w-4 h-4 text-emerald-400" />
+                    <span>Active Workstation Assignments ({assignments.length})</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Authorized VM mappings currently active. Standard users only see their assigned VMs.
+                  </p>
+                </div>
+
+                {/* Filters */}
+                <div className="flex items-center space-x-2">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Search user or VM..."
+                      value={assignmentSearch}
+                      onChange={(e) => setAssignmentSearch(e.target.value)}
+                      className="pl-8 pr-3 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-44 sm:w-56"
+                    />
+                  </div>
+
+                  <select
+                    value={assignmentUserFilter}
+                    onChange={(e) => setAssignmentUserFilter(e.target.value)}
+                    className="px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="all">All Users</option>
+                    {usersList.map((u) => (
+                      <option key={u.id} value={String(u.id)}>
+                        {u.full_name}
+                      </option>
                     ))}
-                  </tbody>
-                </table>
+                  </select>
+                </div>
               </div>
-            )}
+
+              {filteredAssignments.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 text-xs">
+                  {assignments.length === 0
+                    ? "No active assignments yet. Assign VMs to users using the creator panel above."
+                    : "No assignments match your search filter."}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs text-slate-300">
+                    <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                      <tr>
+                        <th className="py-3 px-4">User</th>
+                        <th className="py-3 px-4">Assigned Virtual Machine</th>
+                        <th className="py-3 px-4">Power Status</th>
+                        <th className="py-3 px-4">Remote Protocol</th>
+                        <th className="py-3 px-4">Assignment Date</th>
+                        <th className="py-3 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {filteredAssignments.map((asg) => {
+                        const vm = vms.find((v) => v.id === asg.vm_id);
+                        const os = detectOs(vm?.guest_os);
+                        const initials = (asg.user_name || asg.user_email || "U").slice(0, 2).toUpperCase();
+
+                        return (
+                          <tr key={asg.id} className="hover:bg-slate-800/30 transition">
+                            <td className="py-3 px-4">
+                              <div className="flex items-center space-x-2.5">
+                                <div className="h-7 w-7 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center justify-center font-bold text-[11px] shrink-0">
+                                  {initials}
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-white">{asg.user_name}</div>
+                                  <div className="text-[11px] text-slate-500 font-mono">{asg.user_email}</div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex items-center space-x-2">
+                                <os.icon className={`w-4 h-4 shrink-0 ${os.iconColor}`} />
+                                <div>
+                                  <div className="font-medium text-slate-200">{asg.vm_name}</div>
+                                  <div className="text-[10px] text-slate-500 font-mono">
+                                    {vm?.ip_address || "No IP"} {vm ? `· ${vm.cpu} Core / ${Math.round(vm.ram_mb / 1024)}GB` : ""}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                                  asg.vm_power_state === "on"
+                                    ? "text-emerald-400 bg-emerald-950 border border-emerald-800"
+                                    : "text-slate-400 bg-slate-800 border border-slate-700"
+                                }`}
+                              >
+                                {asg.vm_power_state || "off"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-mono text-xs text-emerald-400 font-medium uppercase">
+                                {asg.vm_remote_protocol || "Auto"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-400 font-mono text-[11px]">
+                              {formatDateTime(asg.created_at)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <button
+                                onClick={() => handleRevokeAssignment(asg.id, asg.vm_name)}
+                                className="px-2.5 py-1 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 text-xs font-medium transition"
+                              >
+                                Revoke Access
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1607,57 +2070,239 @@ export default function App() {
             TAB: USERS (ADMIN ONLY)
         ========================================================================= */}
         {activeTab === "users" && currentUser.role === "admin" && (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-white">User Accounts</h2>
-                <p className="text-xs text-slate-400">Manage administrator and standard user privileges.</p>
+          <div className="space-y-6">
+            {/* Header with Add User button */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-semibold text-white flex items-center space-x-2">
+                    <Users className="w-5 h-5 text-emerald-400" />
+                    <span>User Accounts & Access Control</span>
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Create system users, manage administrative roles, and assign VMware workstations.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAddUserModal(!showAddUserModal)}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-1.5 shadow-md shadow-emerald-950/50 self-start sm:self-auto"
+                >
+                  {showAddUserModal ? <X className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
+                  <span>{showAddUserModal ? "Cancel" : "Add New User"}</span>
+                </button>
               </div>
-            </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs text-slate-300">
-                <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
-                  <tr>
-                    <th className="py-3 px-4">Name</th>
-                    <th className="py-3 px-4">Email</th>
-                    <th className="py-3 px-4">Role</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4">Last Login</th>
-                    <th className="py-3 px-4">Created</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {usersList.map((u) => (
-                    <tr key={u.id} className="hover:bg-slate-800/30">
-                      <td className="py-3 px-4 font-semibold text-white">{u.full_name}</td>
-                      <td className="py-3 px-4 font-mono text-slate-300">{u.email}</td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                            u.role === "admin"
-                              ? "bg-purple-950 text-purple-300 border border-purple-800"
-                              : "bg-slate-800 text-slate-300"
-                          }`}
+              {/* Add User Drawer / Form */}
+              {showAddUserModal && (
+                <div className="bg-slate-950/80 border border-emerald-500/30 rounded-xl p-5 space-y-4 shadow-lg animate-in fade-in duration-200">
+                  <div className="flex items-center space-x-2 border-b border-slate-800 pb-3">
+                    <UserPlus className="w-4 h-4 text-emerald-400" />
+                    <h3 className="text-sm font-semibold text-white">Create New User Account</h3>
+                  </div>
+
+                  {addUserError && (
+                    <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-lg text-rose-300 text-xs flex items-center space-x-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                      <span>{addUserError}</span>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleAddUser} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          Full Name <span className="text-rose-400">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={addUserForm.full_name}
+                          onChange={(e) => setAddUserForm({ ...addUserForm, full_name: e.target.value })}
+                          placeholder="e.g. Jane Doe"
+                          className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          Email Address <span className="text-rose-400">*</span>
+                        </label>
+                        <input
+                          type="email"
+                          required
+                          value={addUserForm.email}
+                          onChange={(e) => setAddUserForm({ ...addUserForm, email: e.target.value })}
+                          placeholder="jane@cloud4green.com"
+                          className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">Role</label>
+                        <select
+                          value={addUserForm.role}
+                          onChange={(e) => setAddUserForm({ ...addUserForm, role: e.target.value })}
+                          className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
                         >
-                          {u.role}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                            u.is_active ? "text-emerald-400 bg-emerald-950" : "text-slate-500 bg-slate-800"
-                          }`}
-                        >
-                          {u.is_active ? "Active" : "Disabled"}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-slate-400">{formatDateTime(u.last_login)}</td>
-                      <td className="py-3 px-4 text-slate-400">{formatDate(u.created_at)}</td>
+                          <option value="user">Standard User</option>
+                          <option value="admin">System Administrator</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          Initial Password <span className="text-rose-400">*</span>
+                        </label>
+                        <input
+                          type="password"
+                          required
+                          minLength={12}
+                          value={addUserForm.password}
+                          onChange={(e) => setAddUserForm({ ...addUserForm, password: e.target.value })}
+                          placeholder="Min 12 characters"
+                          className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-xs focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end space-x-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowAddUserModal(false);
+                          setAddUserError("");
+                        }}
+                        className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={addUserLoading || !addUserForm.full_name || !addUserForm.email || addUserForm.password.length < 12}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-1.5 disabled:opacity-50 shadow-md shadow-emerald-950/50"
+                      >
+                        {addUserLoading ? (
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        <span>Create Account</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Users Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                    <tr>
+                      <th className="py-3.5 px-4">User</th>
+                      <th className="py-3.5 px-4">Role</th>
+                      <th className="py-3.5 px-4">Status</th>
+                      <th className="py-3.5 px-4">Assigned Workstations</th>
+                      <th className="py-3.5 px-4">Member Since</th>
+                      <th className="py-3.5 px-4">Last Login</th>
+                      <th className="py-3.5 px-4 text-right">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {usersList.map((u) => {
+                      const initials = (u.full_name || u.email || "U").slice(0, 2).toUpperCase();
+                      const vmCount = u.assigned_vm_count ?? (u.assigned_vm_ids?.length || 0);
+
+                      return (
+                        <tr key={u.id} className="hover:bg-slate-800/30 transition">
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center space-x-3">
+                              <div className="h-8 w-8 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center justify-center font-bold text-xs shrink-0">
+                                {initials}
+                              </div>
+                              <div>
+                                <div className="font-semibold text-white">{u.full_name}</div>
+                                <div className="text-[11px] text-slate-500 font-mono">{u.email}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+                                u.role === "admin"
+                                  ? "bg-purple-950 text-purple-300 border border-purple-800"
+                                  : "bg-slate-800 text-slate-300 border border-slate-700"
+                              }`}
+                            >
+                              {u.role === "admin" ? "Admin" : "Standard User"}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                u.is_active
+                                  ? "text-emerald-400 bg-emerald-950 border border-emerald-800"
+                                  : "text-slate-500 bg-slate-800 border border-slate-700"
+                              }`}
+                            >
+                              {u.is_active ? "Active" : "Disabled"}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <button
+                              type="button"
+                              onClick={() => openUserVmModal(u)}
+                              className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-xs text-slate-300 hover:text-white transition"
+                              title="Click to manage assigned workstations"
+                            >
+                              <Link2 className="w-3.5 h-3.5 text-emerald-400" />
+                              <span className="font-semibold text-white">{vmCount}</span>
+                              <span className="text-slate-400">VM(s)</span>
+                            </button>
+                          </td>
+                          <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">{formatDate(u.created_at)}</td>
+                          <td className="py-3.5 px-4 text-slate-400 font-mono text-[11px]">
+                            {formatDateTime(u.last_login)}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <div className="flex items-center justify-end space-x-2">
+                              <button
+                                type="button"
+                                onClick={() => openUserVmModal(u)}
+                                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition"
+                                title="Manage VM assignments"
+                              >
+                                Manage VMs
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openEditUserModal(u)}
+                                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition"
+                                title="Edit user details"
+                              >
+                                Edit
+                              </button>
+                              {u.id !== currentUser.id && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleUserStatus(u)}
+                                  className={`px-2 py-1 rounded text-xs font-medium transition ${
+                                    u.is_active
+                                      ? "bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-800"
+                                      : "bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-800"
+                                  }`}
+                                >
+                                  {u.is_active ? "Disable" : "Enable"}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -2280,6 +2925,313 @@ export default function App() {
               >
                 {profileSaveLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
                 <span>Save Policy</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: EDIT USER (ADMIN ONLY)
+      ========================================================================= */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <Edit2 className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-semibold text-white">Edit User Account</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingUser(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {editUserError && (
+              <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-lg text-rose-300 text-xs flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{editUserError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEditUser} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Email Address</label>
+                <input
+                  type="text"
+                  disabled
+                  value={editingUser.email}
+                  className="w-full px-3 py-2 bg-slate-950/50 border border-slate-800 rounded-lg text-slate-400 font-mono"
+                />
+                <span className="text-[10px] text-slate-500">Email address cannot be modified.</span>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Full Name <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editUserForm.full_name}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, full_name: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">Account Role</label>
+                <select
+                  value={editUserForm.role}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, role: e.target.value })}
+                  disabled={editingUser.id === currentUser?.id}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500 disabled:opacity-60"
+                >
+                  <option value="user">Standard User</option>
+                  <option value="admin">System Administrator</option>
+                </select>
+                {editingUser.id === currentUser?.id && (
+                  <span className="text-[10px] text-slate-500">Cannot alter your own role.</span>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="edit_is_active"
+                  checked={editUserForm.is_active}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, is_active: e.target.checked })}
+                  disabled={editingUser.id === currentUser?.id}
+                  className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                />
+                <label htmlFor="edit_is_active" className="text-slate-300 font-medium">
+                  Active Account (can sign in)
+                </label>
+              </div>
+
+              <div className="border-t border-slate-800 pt-3">
+                <label className="block font-medium text-slate-300 mb-1">
+                  Reset Password (Optional)
+                </label>
+                <input
+                  type="password"
+                  value={editUserForm.password}
+                  onChange={(e) => setEditUserForm({ ...editUserForm, password: e.target.value })}
+                  placeholder="Leave blank to retain current password"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                />
+                <span className="text-[10px] text-slate-500">Min 12 characters if updating password.</span>
+              </div>
+
+              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editUserLoading || !editUserForm.full_name}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-1.5 disabled:opacity-50 shadow-md shadow-emerald-950/50"
+                >
+                  {editUserLoading ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5" />
+                  )}
+                  <span>Save Changes</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: DIRECT USER WORKSTATION MANAGER (ADMIN ONLY)
+      ========================================================================= */}
+      {userManageModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2">
+                <Link2 className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-base font-semibold text-white">
+                    Manage Workstations for {userManageModal.full_name}
+                  </h3>
+                  <p className="text-xs text-slate-400 font-mono">{userManageModal.email}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUserManageModal(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-5 text-xs pr-1">
+              {/* Currently Assigned List */}
+              <div>
+                <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                  Currently Assigned Workstations
+                </h4>
+                {(() => {
+                  const userAsgs = assignments.filter((a) => a.user_id === userManageModal.id);
+                  if (userAsgs.length === 0) {
+                    return (
+                      <div className="py-4 text-center bg-slate-950/50 rounded-lg border border-slate-800 text-slate-500">
+                        No virtual machines assigned to this user yet.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {userAsgs.map((a) => {
+                        const vm = vms.find((v) => v.id === a.vm_id);
+                        const os = detectOs(vm?.guest_os);
+                        return (
+                          <div
+                            key={a.id}
+                            className="flex items-center justify-between p-2.5 bg-slate-950/70 border border-slate-800 rounded-lg hover:border-slate-700 transition"
+                          >
+                            <div className="flex items-center space-x-2.5">
+                              <os.icon className={`w-4 h-4 shrink-0 ${os.iconColor}`} />
+                              <div>
+                                <span className="font-semibold text-white">{a.vm_name}</span>
+                                <span className="text-slate-500 text-[11px] ml-2 font-mono">
+                                  {vm?.ip_address || "No IP reported"}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[9px] font-semibold uppercase ${
+                                  a.vm_power_state === "on"
+                                    ? "text-emerald-400 bg-emerald-950"
+                                    : "text-slate-400 bg-slate-800"
+                                }`}
+                              >
+                                {a.vm_power_state || "off"}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleUserModalRevoke(a.id, a.vm_name)}
+                                className="px-2 py-0.5 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 text-[11px] font-medium transition"
+                              >
+                                Revoke
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Assign Additional Workstations */}
+              <div className="border-t border-slate-800 pt-4">
+                <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                  Assign Additional Workstations
+                </h4>
+                {(() => {
+                  const assignedVmIds = new Set(
+                    assignments.filter((a) => a.user_id === userManageModal.id).map((a) => a.vm_id)
+                  );
+                  const availableForUser = vms.filter((v) => !assignedVmIds.has(v.id));
+
+                  if (availableForUser.length === 0) {
+                    return (
+                      <div className="py-4 text-center bg-slate-950/50 rounded-lg border border-slate-800 text-slate-500">
+                        All inventory VMs are already assigned to this user.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto p-1.5 bg-slate-950/70 rounded-lg border border-slate-800">
+                        {availableForUser.map((vm) => {
+                          const isChecked = userManageSelectedVmIds.includes(vm.id);
+                          const os = detectOs(vm.guest_os);
+
+                          return (
+                            <label
+                              key={vm.id}
+                              className={`flex items-start space-x-2 p-2 rounded-lg border cursor-pointer text-xs select-none transition ${
+                                isChecked
+                                  ? "border-emerald-500/80 bg-emerald-950/30 text-white"
+                                  : "border-slate-800 hover:bg-slate-900 text-slate-300"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setUserManageSelectedVmIds([...userManageSelectedVmIds, vm.id]);
+                                  } else {
+                                    setUserManageSelectedVmIds(
+                                      userManageSelectedVmIds.filter((id) => id !== vm.id)
+                                    );
+                                  }
+                                }}
+                                className="mt-0.5 rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center space-x-1.5">
+                                  <os.icon className={`w-3.5 h-3.5 shrink-0 ${os.iconColor}`} />
+                                  <span className="font-semibold text-white truncate">{vm.name}</span>
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-mono mt-0.5 truncate">
+                                  {vm.ip_address || "No IP"} · {os.label}
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-slate-400 text-xs">
+                          {userManageSelectedVmIds.length} VM(s) selected
+                        </span>
+                        <button
+                          type="button"
+                          disabled={userManageLoading || userManageSelectedVmIds.length === 0}
+                          onClick={handleUserModalAssign}
+                          className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-1.5 disabled:opacity-50 shadow-md shadow-emerald-950/50"
+                        >
+                          {userManageLoading ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5" />
+                          )}
+                          <span>Assign Selected Workstation(s)</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            <div className="border-t border-slate-800 pt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setUserManageModal(null)}
+                className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+              >
+                Done
               </button>
             </div>
           </div>

@@ -6,6 +6,8 @@ export interface User {
   is_active: boolean;
   created_at?: string | null;
   last_login?: string | null;
+  assigned_vm_count?: number;
+  assigned_vm_ids?: number[];
 }
 
 export interface RemoteAccessMeta {
@@ -43,6 +45,13 @@ export interface ConnectionProfile {
   updated_at?: string | null;
 }
 
+export interface AssignedUserMeta {
+  assignment_id: number;
+  user_id: number;
+  email: string;
+  full_name: string;
+}
+
 export interface VM {
   id: number;
   uuid: string;
@@ -58,6 +67,7 @@ export interface VM {
   connection_state?: "connected" | "orphaned" | "inaccessible" | "invalid" | "host_disconnected" | string;
   source?: string;
   remote_access?: RemoteAccessMeta;
+  assigned_users?: AssignedUserMeta[];
 }
 
 export interface RemoteStatus {
@@ -239,5 +249,33 @@ export async function deleteConnectionProfile(id: number): Promise<{ success: bo
 
 export async function assignVmConnectionProfile(vmId: number, profileId: number | null): Promise<any> {
   return api<any>(`/admin/vms/${vmId}/connection-profile`, "PUT", { profile_id: profileId });
+}
+
+export async function getUsers(): Promise<User[]> {
+  return api<User[]>("/admin/users");
+}
+
+export async function createUser(data: { email: string; full_name: string; password: string; role: string }): Promise<User> {
+  return api<User>("/admin/users", "POST", data);
+}
+
+export async function updateUser(id: number, data: { full_name?: string; role?: string; is_active?: boolean; password?: string }): Promise<User> {
+  return api<User>(`/admin/users/${id}`, "PUT", data);
+}
+
+export async function disableUser(id: number): Promise<{ ok: boolean; message: string }> {
+  return api<{ ok: boolean; message: string }>(`/admin/users/${id}`, "DELETE");
+}
+
+export async function getAssignments(): Promise<Assignment[]> {
+  return api<Assignment[]>("/admin/assignments");
+}
+
+export async function createAssignments(userId: number, vmIds: number[]): Promise<{ created: number; message: string }> {
+  return api<{ created: number; message: string }>("/admin/assignments", "POST", { user_id: userId, vm_ids: vmIds });
+}
+
+export async function revokeAssignment(assignmentId: number): Promise<{ ok: boolean; message: string }> {
+  return api<{ ok: boolean; message: string }>(`/admin/assignments/${assignmentId}`, "DELETE");
 }
 

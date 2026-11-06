@@ -415,6 +415,21 @@ def vm_out(v: m.VirtualMachine, db: Session | None = None, include_remote_meta: 
     }
     if include_remote_meta:
         if db:
+            assignments = db.scalars(
+                select(m.VmAssignment).where(m.VmAssignment.vm_id == v.id)
+            ).all()
+            assigned_list = []
+            for asg in assignments:
+                usr = db.get(m.User, asg.user_id)
+                if usr:
+                    assigned_list.append({
+                        "assignment_id": asg.id,
+                        "user_id": usr.id,
+                        "email": usr.email,
+                        "full_name": usr.full_name,
+                    })
+            res["assigned_users"] = assigned_list
+
             resolved = resolve_vm_connection(db, v)
             is_configured = resolved.source_type in ("per_vm", "shared_profile")
             res["remote_access"] = {
@@ -454,6 +469,8 @@ def vm_out(v: m.VirtualMachine, db: Session | None = None, include_remote_meta: 
 
 def user_out(u: m.User, db: Session | None = None):
     last_login = None
+    assigned_count = 0
+    assigned_vm_ids = []
     if db:
         ll = db.scalar(
             select(m.AuditLog.created_at)
@@ -463,6 +480,12 @@ def user_out(u: m.User, db: Session | None = None):
         )
         if ll:
             last_login = to_utc_iso(ll)
+        vm_ids = db.scalars(
+            select(m.VmAssignment.vm_id).where(m.VmAssignment.user_id == u.id)
+        ).all()
+        assigned_vm_ids = list(vm_ids)
+        assigned_count = len(assigned_vm_ids)
+
     return {
         "id": u.id,
         "email": u.email,
@@ -471,6 +494,8 @@ def user_out(u: m.User, db: Session | None = None):
         "is_active": u.is_active,
         "created_at": to_utc_iso(u.created_at),
         "last_login": last_login,
+        "assigned_vm_count": assigned_count,
+        "assigned_vm_ids": assigned_vm_ids,
     }
 
 def issue_token(db: Session, u: m.User):
@@ -1131,7 +1156,7 @@ def a_user_new(b: UserIn, req: Request, a: m.User = Depends(admin_user), db: Ses
     db.add(u)
     db.commit()
     audit(db, a, "user_create", u.email, req)
-    return user_out(u)
+    return user_out(u, db)
 
 @adm.put("/users/{uid}")
 def a_user_upd(uid: int, b: UserUpd, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
@@ -1151,7 +1176,7 @@ def a_user_upd(uid: int, b: UserUpd, req: Request, a: m.User = Depends(admin_use
         u.password_hash = sec.hash_password(b.password)
     db.commit()
     audit(db, a, "user_update", u.email, req)
-    return user_out(db.get(m.User, uid))
+    return user_out(db.get(m.User, uid), db)
 
 @adm.delete("/users/{uid}")
 def a_user_del(uid: int, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
@@ -1514,6 +1539,16 @@ def a_revoke(aid: int, req: Request, a: m.User = Depends(admin_user), db: Sessio
     db.delete(x)
     db.commit()
     audit(db, a, "revoke", f"user={user_id} vm={vm_id}", req)
+    return {"ok": True, "message": "Assignment revoked successfully."}
+
+@adm.delete("/users/{uid}/vms/{vid}")
+def a_revoke_user_vm(uid: int, vid: int, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+    x = db.scalar(select(m.VmAssignment).where(m.VmAssignment.user_id == uid, m.VmAssignment.vm_id == vid))
+    if not x:
+        raise HTTPException(404, "Assignment not found")
+    db.delete(x)
+    db.commit()
+    audit(db, a, "revoke", f"user={uid} vm={vid}", req)
     return {"ok": True, "message": "Assignment revoked successfully."}
 
 @adm.get("/audit-logs")
