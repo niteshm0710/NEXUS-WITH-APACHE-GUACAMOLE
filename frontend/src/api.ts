@@ -13,6 +13,34 @@ export interface RemoteAccessMeta {
   protocol: "rdp" | "ssh" | "vnc" | null;
   port: number | null;
   has_credentials: boolean;
+  can_connect?: boolean;
+  profile_name?: string | null;
+  source_type?: "per_vm" | "shared_profile" | "auto_discovered" | string;
+  target_host?: string;
+  username?: string;
+  reason?: string | null;
+}
+
+export interface ConnectionProfile {
+  id: number;
+  name: string;
+  description: string;
+  os_family: "windows" | "linux" | "all" | string;
+  protocol: "rdp" | "ssh" | "vnc" | string;
+  port: number;
+  username: string;
+  has_password?: boolean;
+  has_private_key?: boolean;
+  domain?: string;
+  security?: string;
+  ignore_cert?: boolean;
+  is_default?: boolean;
+  color_depth?: number;
+  resize_method?: string;
+  enable_audio?: boolean;
+  enable_clipboard?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface VM {
@@ -191,5 +219,25 @@ export async function api<T = any>(path: string, method = "GET", body?: unknown)
   }
 
   return res.json();
+}
+
+export async function getConnectionProfiles(): Promise<ConnectionProfile[]> {
+  return api<ConnectionProfile[]>("/admin/connection-profiles");
+}
+
+export async function createConnectionProfile(data: any): Promise<ConnectionProfile> {
+  return api<ConnectionProfile>("/admin/connection-profiles", "POST", data);
+}
+
+export async function updateConnectionProfile(id: number, data: any): Promise<ConnectionProfile> {
+  return api<ConnectionProfile>(`/admin/connection-profiles/${id}`, "PUT", data);
+}
+
+export async function deleteConnectionProfile(id: number): Promise<{ success: boolean }> {
+  return api<{ success: boolean }>(`/admin/connection-profiles/${id}`, "DELETE");
+}
+
+export async function assignVmConnectionProfile(vmId: number, profileId: number | null): Promise<any> {
+  return api<any>(`/admin/vms/${vmId}/connection-profile`, "PUT", { profile_id: profileId });
 }
 

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import ssl
 import time
@@ -144,6 +145,35 @@ def startup():
                 db.commit()
                 log.info("Initial system administrator created for %s", S.admin_email)
 
+        # Seed default fleet connection policies if none exist
+        if not db.scalar(select(m.ConnectionProfile).limit(1)):
+            default_win_policy = m.ConnectionProfile(
+                name="Default Windows Fleet Policy",
+                description="Fleet-wide one-click RDP policy for Windows virtual machines",
+                os_family="windows",
+                protocol="rdp",
+                port=3389,
+                username="Administrator",
+                domain="vclass.local",
+                security="any",
+                ignore_cert=True,
+                is_default=True,
+            )
+            default_linux_policy = m.ConnectionProfile(
+                name="Default Linux Fleet Policy",
+                description="Fleet-wide one-click SSH policy for Linux virtual machines",
+                os_family="linux",
+                protocol="ssh",
+                port=22,
+                username="ubuntu",
+                security="any",
+                ignore_cert=True,
+                is_default=True,
+            )
+            db.add_all([default_win_policy, default_linux_policy])
+            db.commit()
+            log.info("Default fleet connection policies seeded (Windows RDP & Linux SSH)")
+
 # ---------- Auth Dependencies ----------
 def current_user(req: Request, db: Session = Depends(get_db)) -> m.User:
     auth = req.headers.get("Authorization", "")
@@ -188,7 +218,183 @@ def provider(db: Session) -> PyVmomiProvider:
         raise HTTPException(409, "VMware connection is not configured yet. Configure connection in Admin -> VMware Infrastructure.")
     return PyVmomiProvider(c.host, c.username, sec.decrypt(c.password_enc), c.verify_tls)
 
-def vm_out(v: m.VirtualMachine, include_remote_meta: bool = True):
+@dataclass
+class ResolvedConnection:
+    vm_id: int
+    vm_name: str
+    protocol: str
+    target_host: str
+    target_port: int
+    username: str
+    password: str
+    private_key: str
+    passphrase: str
+    domain: str
+    security: str
+    ignore_cert: bool
+    color_depth: int
+    resize_method: str
+    enable_audio: bool
+    enable_clipboard: bool
+    profile_name: str | None
+    source_type: str  # per_vm | shared_profile | auto_discovered | none
+    can_connect: bool
+    reason: str | None
+
+def resolve_vm_connection(db: Session, vm: m.VirtualMachine) -> ResolvedConnection:
+    """One-click connection resolver:
+    1. Per-VM specific configuration (RemoteAccessConfig)
+    2. Matching shared connection profile / policy (ConnectionProfile)
+    3. Auto-discovered VM IP from VMware Tools
+    4. Fallback defaults based on guest OS (RDP 3389 for Windows, SSH 22 for Linux)
+    """
+    is_win = "windows" in (vm.guest_os or "").lower() or "win" in (vm.name or "").lower()
+    default_proto = "rdp" if is_win else "ssh"
+    default_port = 3389 if is_win else 22
+
+    # 1. Per-VM specific configuration
+    cfg = vm.remote_config
+    has_vm_cfg = bool(cfg and cfg.is_active)
+
+    # 2. Matching shared connection profile / policy
+    target_os = "windows" if is_win else "linux"
+    shared_profile = None
+    if getattr(vm, "profile_id", None):
+        shared_profile = db.get(m.ConnectionProfile, vm.profile_id)
+    if not shared_profile:
+        # Default profile for matching OS family or "all"
+        shared_profile = db.scalar(
+            select(m.ConnectionProfile)
+            .where(
+                or_(
+                    m.ConnectionProfile.os_family == target_os,
+                    m.ConnectionProfile.os_family == "all",
+                ),
+                m.ConnectionProfile.is_default == True,
+            )
+            .order_by(m.ConnectionProfile.id.desc())
+        )
+    if not shared_profile:
+        # Fallback to any profile matching the OS family
+        shared_profile = db.scalar(
+            select(m.ConnectionProfile)
+            .where(m.ConnectionProfile.os_family == target_os)
+            .order_by(m.ConnectionProfile.id.asc())
+        )
+
+    # Target host: per-VM override -> auto-discovered IP
+    target_host = ""
+    if has_vm_cfg and cfg.host.strip():
+        target_host = cfg.host.strip()
+    elif vm.ip_address.strip():
+        target_host = vm.ip_address.strip()
+
+    # Protocol & port
+    if has_vm_cfg and cfg.protocol:
+        protocol = cfg.protocol.lower()
+        port = cfg.port or (3389 if protocol == "rdp" else 22)
+    elif shared_profile and shared_profile.protocol:
+        protocol = shared_profile.protocol.lower()
+        port = shared_profile.port or (3389 if protocol == "rdp" else 22)
+    else:
+        protocol = default_proto
+        port = default_port
+
+    # Credentials & security parameters
+    username = ""
+    password = ""
+    private_key = ""
+    passphrase = ""
+    domain = ""
+    security = "any"
+    ignore_cert = True
+    color_depth = 24
+    resize_method = "display-update"
+    enable_audio = True
+    enable_clipboard = True
+    profile_name = None
+    source_type = "auto_discovered"
+
+    if has_vm_cfg and (cfg.username or cfg.password_enc or cfg.private_key_enc or cfg.host):
+        source_type = "per_vm"
+        username = cfg.username
+        password = sec.decrypt(cfg.password_enc) if cfg.password_enc else ""
+        private_key = sec.decrypt(cfg.private_key_enc) if cfg.private_key_enc else ""
+        passphrase = sec.decrypt(cfg.passphrase_enc) if cfg.passphrase_enc else ""
+        domain = cfg.domain
+        security = cfg.security or "any"
+        ignore_cert = cfg.ignore_cert
+        color_depth = cfg.color_depth or 24
+        resize_method = cfg.resize_method or "display-update"
+        enable_audio = cfg.enable_audio
+        enable_clipboard = cfg.enable_clipboard
+        # Inherit credentials from shared profile if per-VM hasn't set them
+        if not password and not private_key and shared_profile:
+            password = sec.decrypt(shared_profile.password_enc) if shared_profile.password_enc else ""
+            private_key = sec.decrypt(shared_profile.private_key_enc) if shared_profile.private_key_enc else ""
+            passphrase = sec.decrypt(shared_profile.passphrase_enc) if shared_profile.passphrase_enc else ""
+            if not username:
+                username = shared_profile.username
+            if not domain:
+                domain = shared_profile.domain
+            profile_name = shared_profile.name
+    elif shared_profile:
+        source_type = "shared_profile"
+        profile_name = shared_profile.name
+        username = shared_profile.username
+        password = sec.decrypt(shared_profile.password_enc) if shared_profile.password_enc else ""
+        private_key = sec.decrypt(shared_profile.private_key_enc) if shared_profile.private_key_enc else ""
+        passphrase = sec.decrypt(shared_profile.passphrase_enc) if shared_profile.passphrase_enc else ""
+        domain = shared_profile.domain
+        security = shared_profile.security or "any"
+        ignore_cert = shared_profile.ignore_cert
+        color_depth = shared_profile.color_depth or 24
+        resize_method = shared_profile.resize_method or "display-update"
+        enable_audio = shared_profile.enable_audio
+        enable_clipboard = shared_profile.enable_clipboard
+    else:
+        source_type = "auto_discovered"
+        if is_win:
+            username = "Administrator"
+
+    is_configured = (source_type in ("per_vm", "shared_profile"))
+    can_connect = True
+    reason = None
+
+    if vm.power_state != "on":
+        can_connect = False
+        reason = f"VM '{vm.name}' is powered off. Please power it on first."
+    elif not is_configured:
+        can_connect = False
+        reason = "Remote access is not configured for this machine. Contact your administrator."
+    elif not target_host:
+        can_connect = False
+        reason = "Target IP address unavailable (VMware Tools may not be reporting network information, and no manual host is configured)."
+
+    return ResolvedConnection(
+        vm_id=vm.id,
+        vm_name=vm.name,
+        protocol=protocol,
+        target_host=target_host,
+        target_port=port,
+        username=username,
+        password=password,
+        private_key=private_key,
+        passphrase=passphrase,
+        domain=domain,
+        security=security,
+        ignore_cert=ignore_cert,
+        color_depth=color_depth,
+        resize_method=resize_method,
+        enable_audio=enable_audio,
+        enable_clipboard=enable_clipboard,
+        profile_name=profile_name,
+        source_type=source_type,
+        can_connect=can_connect,
+        reason=reason,
+    )
+
+def vm_out(v: m.VirtualMachine, db: Session | None = None, include_remote_meta: bool = True):
     res = {
         "id": v.id,
         "uuid": v.uuid,
@@ -202,18 +408,48 @@ def vm_out(v: m.VirtualMachine, include_remote_meta: bool = True):
         "host": v.host,
         "datastore": v.datastore,
         "connection_state": getattr(v, "connection_state", "connected") or "connected",
+        "profile_id": getattr(v, "profile_id", None),
         "source": v.source,
         "created_at": to_utc_iso(v.created_at),
         "updated_at": to_utc_iso(v.updated_at),
     }
     if include_remote_meta:
-        cfg = v.remote_config
-        res["remote_access"] = {
-            "configured": bool(cfg and cfg.is_active),
-            "protocol": cfg.protocol if cfg and cfg.is_active else None,
-            "port": cfg.port if cfg and cfg.is_active else None,
-            "has_credentials": bool(cfg and (cfg.password_enc or cfg.private_key_enc)) if cfg else False,
-        }
+        if db:
+            resolved = resolve_vm_connection(db, v)
+            is_configured = resolved.source_type in ("per_vm", "shared_profile")
+            res["remote_access"] = {
+                "configured": is_configured,
+                "protocol": resolved.protocol.lower(),
+                "port": resolved.target_port,
+                "target_host": resolved.target_host,
+                "username": resolved.username,
+                "has_credentials": bool(resolved.password or resolved.private_key),
+                "can_connect": resolved.can_connect,
+                "profile_name": resolved.profile_name,
+                "source_type": resolved.source_type,
+                "reason": resolved.reason,
+            }
+        else:
+            cfg = v.remote_config
+            is_configured = bool(cfg and cfg.is_active)
+            is_win = "windows" in (v.guest_os or "").lower() or "win" in (v.name or "").lower()
+            proto = cfg.protocol.upper() if cfg and cfg.is_active else ("RDP" if is_win else "SSH")
+            port = cfg.port if cfg and cfg.is_active else (3389 if is_win else 22)
+            host = (cfg.host if cfg and cfg.is_active else "") or v.ip_address
+            res["remote_access"] = {
+                "configured": is_configured,
+                "protocol": proto,
+                "port": port,
+                "target_host": host,
+                "username": (cfg.username if cfg and cfg.is_active else ("Administrator" if is_win else "")),
+                "has_credentials": bool(cfg and (cfg.password_enc or cfg.private_key_enc)) if cfg else False,
+                "can_connect": bool(v.power_state == "on" and bool(host)),
+                "profile_name": None,
+                "source_type": "per_vm" if is_configured else "auto_discovered",
+                "reason": None if (v.power_state == "on" and bool(host)) else (
+                    "VM is powered off. Please power on first." if v.power_state != "on" else "IP address unavailable."
+                ),
+            }
     return res
 
 def user_out(u: m.User, db: Session | None = None):
@@ -295,6 +531,25 @@ class VmwareIn(BaseModel):
     username: str
     password: str
     verify_tls: bool = True
+
+class ConnectionProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=255)
+    os_family: str = Field(default="windows", pattern="^(windows|linux|all)$")
+    protocol: str = Field(default="rdp", pattern="^(rdp|ssh|vnc)$")
+    port: int = Field(default=3389, ge=1, le=65535)
+    username: str = Field(default="", max_length=255)
+    password: str | None = None
+    private_key: str | None = None
+    passphrase: str | None = None
+    domain: str = Field(default="", max_length=255)
+    security: str = Field(default="any", max_length=32)
+    ignore_cert: bool = True
+    color_depth: int = 24
+    resize_method: str = "display-update"
+    enable_audio: bool = True
+    enable_clipboard: bool = True
+    is_default: bool = False
 
 class RemoteConfigIn(BaseModel):
     protocol: str = Field(pattern="^(rdp|ssh|vnc)$")
@@ -411,7 +666,7 @@ def my_vms(u: m.User = Depends(current_user), db: Session = Depends(get_db)):
             .where(m.VmAssignment.user_id == u.id)
             .order_by(m.VirtualMachine.name)
         ).all()
-    return [vm_out(v) for v in rows]
+    return [vm_out(v, db) for v in rows]
 
 @api.get("/vms/{vm_id}")
 def vm_get(vm_id: int, u: m.User = Depends(current_user), db: Session = Depends(get_db)):
@@ -422,28 +677,27 @@ def vm_get(vm_id: int, u: m.User = Depends(current_user), db: Session = Depends(
         .order_by(m.AuditLog.id.desc())
         .limit(10)
     ).all()
-    return vm_out(v) | {
+    return vm_out(v, db) | {
         "recent_activity": [{"action": a.action, "detail": a.detail, "at": to_utc_iso(a.created_at)} for a in acts]
     }
 
 @api.get("/vms/{vm_id}/remote-status")
 def vm_remote_status(vm_id: int, u: m.User = Depends(current_user), db: Session = Depends(get_db)):
-    """Safe check for remote access readiness: returns protocol and power state, NEVER passwords."""
+    """Safe check for remote access readiness: returns resolved protocol and power state, NEVER passwords."""
     v = assigned_vm(db, u, vm_id)
-    cfg = v.remote_config
-    is_configured = bool(cfg and cfg.is_active and cfg.host)
+    resolved = resolve_vm_connection(db, v)
     return {
         "vm_id": v.id,
         "vm_name": v.name,
         "power_state": v.power_state,
-        "configured": is_configured,
-        "protocol": cfg.protocol if is_configured else None,
-        "host": cfg.host if is_configured else None,
-        "port": cfg.port if is_configured else None,
-        "can_connect": bool(is_configured and v.power_state == "on"),
-        "reason": None if (is_configured and v.power_state == "on") else (
-            "VM is powered off. Please power on the machine first." if v.power_state != "on" else "Remote access is not configured for this machine. Contact your administrator."
-        ),
+        "configured": resolved.source_type in ("per_vm", "shared_profile"),
+        "protocol": resolved.protocol.lower(),
+        "host": resolved.target_host,
+        "port": resolved.target_port,
+        "can_connect": resolved.can_connect,
+        "profile_name": resolved.profile_name,
+        "source_type": resolved.source_type,
+        "reason": resolved.reason,
     }
 
 @api.post("/vms/{vm_id}/power")
@@ -454,7 +708,7 @@ def vm_power(vm_id: int, b: Power, req: Request, u: m.User = Depends(current_use
     except VMwareError as e:
         raise HTTPException(502, str(e))
     audit(db, u, f"power_{b.action}", f"vm={v.id}", req)
-    return vm_out(v)
+    return vm_out(v, db)
 
 # ---------- Apache Guacamole Browser Remote Access WebSocket Tunnel ----------
 @api.websocket("/vms/{vm_id}/guac-ws")
@@ -509,34 +763,18 @@ async def guac_websocket_tunnel(
             await websocket.close(code=4404, reason=f"Virtual machine #{vm_id} not found or not assigned to your account")
             return
 
-        # 3. Power state check
-        if vm.power_state != "on":
-            await websocket.close(code=4400, reason=f"VM '{vm.name}' is currently powered off. Please power it on first.")
+        # 3. Resolve connection details automatically (One-Click Guacamole Engine)
+        res = resolve_vm_connection(db, vm)
+        if not res.can_connect:
+            await websocket.close(code=4400, reason=res.reason or "Cannot establish remote connection to VM.")
             return
 
-        # 4. Remote configuration check
-        cfg = vm.remote_config
-        if not cfg or not cfg.is_active:
-            await websocket.close(
-                code=4404,
-                reason=f"Remote access has not been configured for VM '{vm.name}'. Please contact your administrator."
-            )
-            return
-
-        # 5. Extract target host and decrypted credentials safely server-side
-        protocol = cfg.protocol.lower()
-        target_host = cfg.host.strip() or vm.ip_address.strip()
-        if not target_host:
-            await websocket.close(
-                code=4400,
-                reason=f"Target host address is not configured for VM '{vm.name}', and no IP was reported by VMware Tools."
-            )
-            return
-
-        target_port = cfg.port or (3389 if protocol == "rdp" else (22 if protocol == "ssh" else 5900))
-        password = sec.decrypt(cfg.password_enc) if cfg.password_enc else ""
-        private_key = sec.decrypt(cfg.private_key_enc) if cfg.private_key_enc else ""
-        passphrase = sec.decrypt(cfg.passphrase_enc) if cfg.passphrase_enc else ""
+        protocol = res.protocol
+        target_host = res.target_host
+        target_port = res.target_port
+        password = res.password
+        private_key = res.private_key
+        passphrase = res.passphrase
 
         # Build guacd parameters map based on protocol
         params: dict[str, str] = {
@@ -549,23 +787,23 @@ async def guac_websocket_tunnel(
 
         if protocol == "rdp":
             params.update({
-                "username": cfg.username,
+                "username": res.username,
                 "password": password,
-                "domain": cfg.domain,
-                "security": cfg.security or "any",
-                "ignore-cert": "true" if cfg.ignore_cert else "false",
-                "color-depth": str(cfg.color_depth or 24),
-                "resize-method": cfg.resize_method or "display-update",
+                "domain": res.domain,
+                "security": res.security or "any",
+                "ignore-cert": "true" if res.ignore_cert else "false",
+                "color-depth": str(res.color_depth or 24),
+                "resize-method": res.resize_method or "display-update",
                 "enable-font-smoothing": "true",
                 "enable-wallpaper": "false",
                 "enable-theming": "true",
                 "enable-full-window-drag": "false",
-                "enable-audio": "true" if cfg.enable_audio else "false",
-                "disable-audio": "false" if cfg.enable_audio else "true",
+                "enable-audio": "true" if res.enable_audio else "false",
+                "disable-audio": "false" if res.enable_audio else "true",
             })
         elif protocol == "ssh":
             params.update({
-                "username": cfg.username,
+                "username": res.username,
                 "password": password,
                 "private-key": private_key,
                 "passphrase": passphrase,
@@ -576,7 +814,7 @@ async def guac_websocket_tunnel(
         elif protocol == "vnc":
             params.update({
                 "password": password,
-                "color-depth": str(cfg.color_depth or 24),
+                "color-depth": str(res.color_depth or 24),
             })
 
         # Record session log entry
@@ -934,7 +1172,7 @@ def a_vms(name: str | None = None, power_state: str | None = None, db: Session =
         q = q.where(m.VirtualMachine.name.ilike(f"%{name}%"))
     if power_state:
         q = q.where(m.VirtualMachine.power_state == power_state)
-    return [vm_out(v) for v in db.scalars(q)]
+    return [vm_out(v, db) for v in db.scalars(q)]
 
 def do_sync(db: Session, a: m.User, req: Request):
     """Real VMware synchronization with UUID deduplication."""
@@ -996,7 +1234,7 @@ def a_vm_power(vm_id: int, b: Power, req: Request, a: m.User = Depends(admin_use
     except VMwareError as e:
         raise HTTPException(502, str(e))
     audit(db, a, f"admin_power_{b.action}", f"vm={v.id}", req)
-    return vm_out(v)
+    return vm_out(v, db)
 
 # ---------- Admin Remote Access Configuration Endpoints ----------
 @adm.get("/vms/{vm_id}/remote-config")
@@ -1101,6 +1339,129 @@ def a_delete_remote_config(vm_id: int, req: Request, a: m.User = Depends(admin_u
         db.commit()
         audit(db, a, "remote_config_deleted", f"vm={v.id}", req)
     return {"ok": True, "message": f"Remote access configuration for '{v.name}' removed."}
+
+def profile_out(p: m.ConnectionProfile):
+    return {
+        "id": p.id,
+        "name": p.name,
+        "description": p.description,
+        "os_family": p.os_family,
+        "protocol": p.protocol,
+        "port": p.port,
+        "username": p.username,
+        "has_password": bool(p.password_enc),
+        "has_private_key": bool(p.private_key_enc),
+        "domain": p.domain,
+        "security": p.security,
+        "ignore_cert": p.ignore_cert,
+        "color_depth": p.color_depth,
+        "resize_method": p.resize_method,
+        "enable_audio": p.enable_audio,
+        "enable_clipboard": p.enable_clipboard,
+        "is_default": p.is_default,
+        "created_at": to_utc_iso(p.created_at),
+        "updated_at": to_utc_iso(p.updated_at),
+    }
+
+# ---------- Admin Shared Connection Profiles & Policies ----------
+@adm.get("/connection-profiles")
+def a_list_profiles(db: Session = Depends(get_db)):
+    profiles = db.scalars(select(m.ConnectionProfile).order_by(m.ConnectionProfile.name)).all()
+    return [profile_out(p) for p in profiles]
+
+@adm.post("/connection-profiles")
+def a_create_profile(b: ConnectionProfileIn, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+    existing = db.scalar(select(m.ConnectionProfile).where(m.ConnectionProfile.name == b.name.strip()))
+    if existing:
+        raise HTTPException(409, f"A connection profile with name '{b.name}' already exists.")
+
+    if b.is_default:
+        db.query(m.ConnectionProfile).filter(m.ConnectionProfile.os_family == b.os_family).update({"is_default": False})
+
+    p = m.ConnectionProfile(
+        name=b.name.strip(),
+        description=b.description.strip(),
+        os_family=b.os_family,
+        protocol=b.protocol.lower(),
+        port=b.port,
+        username=b.username.strip(),
+        password_enc=sec.encrypt(b.password.strip()) if b.password and b.password.strip() else "",
+        private_key_enc=sec.encrypt(b.private_key.strip()) if b.private_key and b.private_key.strip() else "",
+        passphrase_enc=sec.encrypt(b.passphrase.strip()) if b.passphrase and b.passphrase.strip() else "",
+        domain=b.domain.strip(),
+        security=b.security,
+        ignore_cert=b.ignore_cert,
+        color_depth=b.color_depth,
+        resize_method=b.resize_method,
+        enable_audio=b.enable_audio,
+        enable_clipboard=b.enable_clipboard,
+        is_default=b.is_default,
+    )
+    db.add(p)
+    db.commit()
+    audit(db, a, "profile_create", p.name, req)
+    return profile_out(p)
+
+@adm.put("/connection-profiles/{profile_id}")
+def a_update_profile(profile_id: int, b: ConnectionProfileIn, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+    p = db.get(m.ConnectionProfile, profile_id)
+    if not p:
+        raise HTTPException(404, "Connection profile not found.")
+
+    if b.is_default and not p.is_default:
+        db.query(m.ConnectionProfile).filter(m.ConnectionProfile.os_family == b.os_family).update({"is_default": False})
+
+    p.name = b.name.strip()
+    p.description = b.description.strip()
+    p.os_family = b.os_family
+    p.protocol = b.protocol.lower()
+    p.port = b.port
+    p.username = b.username.strip()
+    if b.password is not None and b.password.strip():
+        p.password_enc = sec.encrypt(b.password.strip())
+    if b.private_key is not None and b.private_key.strip():
+        p.private_key_enc = sec.encrypt(b.private_key.strip())
+    if b.passphrase is not None and b.passphrase.strip():
+        p.passphrase_enc = sec.encrypt(b.passphrase.strip())
+    p.domain = b.domain.strip()
+    p.security = b.security
+    p.ignore_cert = b.ignore_cert
+    p.color_depth = b.color_depth
+    p.resize_method = b.resize_method
+    p.enable_audio = b.enable_audio
+    p.enable_clipboard = b.enable_clipboard
+    p.is_default = b.is_default
+    db.commit()
+    audit(db, a, "profile_update", p.name, req)
+    return profile_out(p)
+
+@adm.delete("/connection-profiles/{profile_id}")
+def a_delete_profile(profile_id: int, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+    p = db.get(m.ConnectionProfile, profile_id)
+    if not p:
+        raise HTTPException(404, "Connection profile not found.")
+    name = p.name
+    db.delete(p)
+    db.commit()
+    audit(db, a, "profile_delete", name, req)
+    return {"ok": True, "message": f"Connection profile '{name}' deleted successfully."}
+
+@adm.put("/vms/{vm_id}/connection-profile")
+def a_assign_vm_profile(vm_id: int, b: dict, req: Request, a: m.User = Depends(admin_user), db: Session = Depends(get_db)):
+    v = db.get(m.VirtualMachine, vm_id)
+    if not v:
+        raise HTTPException(404, "Virtual machine not found.")
+    pid = b.get("profile_id")
+    if pid is not None and int(pid) > 0:
+        p = db.get(m.ConnectionProfile, int(pid))
+        if not p:
+            raise HTTPException(404, "Connection profile not found.")
+        v.profile_id = p.id
+    else:
+        v.profile_id = None
+    db.commit()
+    audit(db, a, "vm_assign_profile", f"vm={v.id} profile={v.profile_id}", req)
+    return vm_out(v, db)
 
 # ---------- Admin Assignment Endpoints ----------
 @adm.get("/assignments")

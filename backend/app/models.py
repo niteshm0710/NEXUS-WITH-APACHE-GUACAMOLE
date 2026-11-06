@@ -39,6 +39,7 @@ class VirtualMachine(Base):
     datastore: Mapped[str] = mapped_column(String(255), default="")
     connection_state: Mapped[str] = mapped_column(String(32), default="connected")
     source: Mapped[str] = mapped_column(String(16), default="vmware")
+    profile_id: Mapped[int | None] = mapped_column(ForeignKey("connection_profiles.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
@@ -47,6 +48,31 @@ class VirtualMachine(Base):
         uselist=False,
         cascade="all, delete-orphan"
     )
+    connection_profile: Mapped["ConnectionProfile | None"] = relationship()
+
+class ConnectionProfile(Base):
+    """Shared Remote Access Connection Policy / Profile configured by administrators."""
+    __tablename__ = "connection_profiles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    os_family: Mapped[str] = mapped_column(String(32), default="windows")  # windows, linux, all
+    protocol: Mapped[str] = mapped_column(String(16), default="rdp")       # rdp, ssh, vnc
+    port: Mapped[int] = mapped_column(Integer, default=3389)
+    username: Mapped[str] = mapped_column(String(255), default="")
+    password_enc: Mapped[str] = mapped_column(Text, default="")
+    private_key_enc: Mapped[str] = mapped_column(Text, default="")
+    passphrase_enc: Mapped[str] = mapped_column(Text, default="")
+    domain: Mapped[str] = mapped_column(String(255), default="")
+    security: Mapped[str] = mapped_column(String(32), default="any")       # any, nla, tls, rdp
+    ignore_cert: Mapped[bool] = mapped_column(Boolean, default=True)
+    color_depth: Mapped[int] = mapped_column(Integer, default=24)
+    resize_method: Mapped[str] = mapped_column(String(32), default="display-update")
+    enable_audio: Mapped[bool] = mapped_column(Boolean, default=True)
+    enable_clipboard: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 class RemoteAccessConfig(Base):
     __tablename__ = "remote_access_configs"

@@ -43,6 +43,9 @@ import {
   Terminal,
   Monitor,
   Key,
+  Sliders,
+  FolderKey,
+  ShieldAlert,
 } from "lucide-react";
 import {
   api,
@@ -59,6 +62,12 @@ import {
   RemoteStatus,
   RemoteConfigDetail,
   RemoteSessionItem,
+  ConnectionProfile,
+  getConnectionProfiles,
+  createConnectionProfile,
+  updateConnectionProfile,
+  deleteConnectionProfile,
+  assignVmConnectionProfile,
 } from "./api";
 import { GuacamoleSession } from "./GuacamoleSession";
 
@@ -249,7 +258,7 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
 
   // App navigation
-  const [activeTab, setActiveTab] = useState<"vms" | "overview" | "users" | "assignments" | "vmware" | "sessions" | "audit" | "support">("vms");
+  const [activeTab, setActiveTab] = useState<"vms" | "overview" | "users" | "assignments" | "profiles" | "sessions" | "audit" | "support">("vms");
 
   // Real Data states
   const [vms, setVms] = useState<VM[]>([]);
@@ -259,6 +268,7 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<AuditItem[]>([]);
   const [remoteSessions, setRemoteSessions] = useState<RemoteSessionItem[]>([]);
   const [tickets, setTickets] = useState<SupportTicketItem[]>([]);
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
 
   // Search & filter
   const [searchQuery, setSearchQuery] = useState("");
@@ -269,6 +279,8 @@ export default function App() {
 
   // Admin Remote Access Config Modal
   const [configModalVm, setConfigModalVm] = useState<VM | null>(null);
+  const [configProfileId, setConfigProfileId] = useState<number | null>(null);
+  const [configMode, setConfigMode] = useState<"profile" | "custom">("profile");
   const [configForm, setConfigForm] = useState<Partial<RemoteConfigDetail>>({
     protocol: "rdp",
     port: 3389,
@@ -282,6 +294,26 @@ export default function App() {
   const [configPrivateKey, setConfigPrivateKey] = useState("");
   const [configSaveLoading, setConfigSaveLoading] = useState(false);
   const [configModalMsg, setConfigModalMsg] = useState("");
+
+  // Admin Fleet Profile Create/Edit Modal
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<ConnectionProfile | null>(null);
+  const [profileForm, setProfileForm] = useState({
+    name: "",
+    description: "",
+    os_family: "windows",
+    protocol: "rdp",
+    port: 3389,
+    username: "Administrator",
+    domain: "",
+    security: "any",
+    ignore_cert: true,
+    is_default: false,
+  });
+  const [profilePassword, setProfilePassword] = useState("");
+  const [profilePrivateKey, setProfilePrivateKey] = useState("");
+  const [profileSaveLoading, setProfileSaveLoading] = useState(false);
+  const [profileModalMsg, setProfileModalMsg] = useState("");
 
   // Sync state
   const [syncLoading, setSyncLoading] = useState(false);
@@ -320,12 +352,19 @@ export default function App() {
   const refreshData = async () => {
     if (!currentUser) return;
     try {
+      if (currentUser.role === "admin") {
+        getConnectionProfiles().then(setProfiles).catch(() => {});
+      }
+
       if (activeTab === "vms") {
         const data = await api<VM[]>("/vms");
         setVms(data);
       } else if (activeTab === "overview" && currentUser.role === "admin") {
         const data = await api<OverviewData>("/admin/overview");
         setOverview(data);
+      } else if (activeTab === "profiles" && currentUser.role === "admin") {
+        const profs = await getConnectionProfiles();
+        setProfiles(profs);
       } else if (activeTab === "users" && currentUser.role === "admin") {
         const data = await api<User[]>("/admin/users");
         setUsersList(data);
@@ -416,20 +455,137 @@ export default function App() {
     }
   };
 
+  // Admin Fleet Connection Profile Handlers
+  const openCreateProfileModal = () => {
+    setEditingProfile(null);
+    setProfileForm({
+      name: "",
+      description: "",
+      os_family: "windows",
+      protocol: "rdp",
+      port: 3389,
+      username: "Administrator",
+      domain: "",
+      security: "any",
+      ignore_cert: true,
+      is_default: false,
+    });
+    setProfilePassword("");
+    setProfilePrivateKey("");
+    setProfileModalMsg("");
+    setProfileModalOpen(true);
+  };
+
+  const openEditProfileModal = (p: ConnectionProfile) => {
+    setEditingProfile(p);
+    setProfileForm({
+      name: p.name,
+      description: p.description || "",
+      os_family: p.os_family,
+      protocol: p.protocol,
+      port: p.port,
+      username: p.username || "",
+      domain: p.domain || "",
+      security: p.security || "any",
+      ignore_cert: p.ignore_cert ?? true,
+      is_default: p.is_default ?? false,
+    });
+    setProfilePassword("");
+    setProfilePrivateKey("");
+    setProfileModalMsg("");
+    setProfileModalOpen(true);
+  };
+
+  const saveProfile = async () => {
+    if (!profileForm.name.trim()) {
+      setProfileModalMsg("Profile name is required.");
+      return;
+    }
+    setProfileSaveLoading(true);
+    setProfileModalMsg("");
+    try {
+      const payload: any = {
+        name: profileForm.name.trim(),
+        description: profileForm.description.trim(),
+        os_family: profileForm.os_family,
+        protocol: profileForm.protocol,
+        port: Number(profileForm.port),
+        username: profileForm.username.trim(),
+        domain: profileForm.domain.trim(),
+        security: profileForm.security || "any",
+        ignore_cert: profileForm.ignore_cert,
+        is_default: profileForm.is_default,
+      };
+      if (profilePassword.trim()) {
+        payload.password = profilePassword.trim();
+      }
+      if (profilePrivateKey.trim()) {
+        payload.private_key = profilePrivateKey.trim();
+      }
+
+      if (editingProfile) {
+        await updateConnectionProfile(editingProfile.id, payload);
+        showBanner(`Connection profile '${payload.name}' updated.`);
+      } else {
+        await createConnectionProfile(payload);
+        showBanner(`New fleet connection policy '${payload.name}' created.`);
+      }
+      setProfileModalOpen(false);
+      refreshData();
+    } catch (err: any) {
+      setProfileModalMsg(err.message || "Failed to save connection profile.");
+    } finally {
+      setProfileSaveLoading(false);
+    }
+  };
+
+  const handleDeleteProfile = async (id: number, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete profile "${name}"?`)) return;
+    try {
+      await deleteConnectionProfile(id);
+      showBanner(`Connection profile "${name}" deleted.`);
+      refreshData();
+    } catch (err: any) {
+      showBanner(err.message || "Failed to delete profile.", "error");
+    }
+  };
+
   // Open Remote Config modal for Admin
   const openRemoteConfigModal = async (vm: VM) => {
     setConfigModalVm(vm);
     setConfigModalMsg("");
     setConfigPassword("");
     setConfigPrivateKey("");
+    setConfigProfileId((vm as any).profile_id || null);
+
+    try {
+      const allProfiles = await getConnectionProfiles();
+      setProfiles(allProfiles);
+    } catch {}
+
     try {
       const detail = await api<RemoteConfigDetail>(`/admin/vms/${vm.id}/remote-config`);
-      setConfigForm({
-        ...detail,
-        host: detail.host || vm.ip_address || "",
-        port: detail.port || (detail.protocol === "ssh" ? 22 : 3389),
-      });
+      if (detail && detail.configured) {
+        setConfigMode("custom");
+        setConfigForm({
+          ...detail,
+          host: detail.host || vm.ip_address || "",
+          port: detail.port || (detail.protocol === "ssh" ? 22 : 3389),
+        });
+      } else {
+        setConfigMode("profile");
+        setConfigForm({
+          protocol: "rdp",
+          port: 3389,
+          host: vm.ip_address || "",
+          username: "",
+          domain: "",
+          security: "any",
+          ignore_cert: true,
+        });
+      }
     } catch {
+      setConfigMode("profile");
       setConfigForm({
         protocol: "rdp",
         port: 3389,
@@ -447,25 +603,30 @@ export default function App() {
     setConfigSaveLoading(true);
     setConfigModalMsg("");
     try {
-      const payload: any = {
-        protocol: configForm.protocol,
-        host: configForm.host,
-        port: Number(configForm.port),
-        username: configForm.username || "",
-        domain: configForm.domain || "",
-        security: configForm.security || "any",
-        ignore_cert: configForm.ignore_cert ?? true,
-        is_active: true,
-      };
-      if (configPassword.trim()) {
-        payload.password = configPassword.trim();
-      }
-      if (configPrivateKey.trim()) {
-        payload.private_key = configPrivateKey.trim();
-      }
+      if (configMode === "profile") {
+        await assignVmConnectionProfile(configModalVm.id, configProfileId);
+        showBanner(`Fleet connection policy assigned to ${configModalVm.name}.`);
+      } else {
+        const payload: any = {
+          protocol: configForm.protocol,
+          host: configForm.host,
+          port: Number(configForm.port),
+          username: configForm.username || "",
+          domain: configForm.domain || "",
+          security: configForm.security || "any",
+          ignore_cert: configForm.ignore_cert ?? true,
+          is_active: true,
+        };
+        if (configPassword.trim()) {
+          payload.password = configPassword.trim();
+        }
+        if (configPrivateKey.trim()) {
+          payload.private_key = configPrivateKey.trim();
+        }
 
-      await api(`/admin/vms/${configModalVm.id}/remote-config`, "PUT", payload);
-      showBanner(`Remote access configuration saved for ${configModalVm.name}.`);
+        await api(`/admin/vms/${configModalVm.id}/remote-config`, "PUT", payload);
+        showBanner(`Remote access configuration saved for ${configModalVm.name}.`);
+      }
       setConfigModalVm(null);
       refreshData();
     } catch (err: any) {
@@ -715,6 +876,18 @@ export default function App() {
                 </button>
 
                 <button
+                  onClick={() => setActiveTab("profiles")}
+                  className={`px-3.5 py-2 rounded-lg text-sm font-medium transition flex items-center space-x-2 ${
+                    activeTab === "profiles"
+                      ? "bg-emerald-600/20 text-emerald-400 border border-emerald-500/30"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
+                  }`}
+                >
+                  <Sliders className="w-4 h-4" />
+                  <span>Fleet Policies</span>
+                </button>
+
+                <button
                   onClick={() => setActiveTab("assignments")}
                   className={`px-3.5 py-2 rounded-lg text-sm font-medium transition flex items-center space-x-2 ${
                     activeTab === "assignments"
@@ -878,7 +1051,11 @@ export default function App() {
                 const os = detectOs(vm.guest_os);
                 const isRunning = vm.power_state === "on";
                 const isConfigured = vm.remote_access?.configured ?? false;
-                const proto = vm.remote_access?.protocol?.toUpperCase();
+                const canConnect = vm.remote_access?.can_connect ?? false;
+                const hasIp = Boolean(vm.ip_address || vm.remote_access?.target_host);
+                const isWin = os.type.startsWith("windows") || (vm.name || "").toLowerCase().includes("win");
+                const proto = (vm.remote_access?.protocol || (isWin ? "rdp" : "ssh")).toUpperCase();
+                const profileName = vm.remote_access?.profile_name;
                 const isOrphaned = vm.connection_state === "orphaned" || vm.connection_state === "inaccessible" || vm.connection_state === "invalid";
                 const isHostOffline = vm.connection_state === "host_disconnected";
                 const isActionable = !isOrphaned && !isHostOffline;
@@ -970,10 +1147,21 @@ export default function App() {
                         </div>
                         <div className="flex justify-between items-center">
                           <span className="text-slate-500">Remote Access:</span>
-                          {isConfigured ? (
-                            <span className="inline-flex items-center space-x-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">
+                          {canConnect ? (
+                            <span
+                              className="inline-flex items-center space-x-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60"
+                              title={profileName ? `Fleet Policy: ${profileName}` : `Auto-resolved ${proto}`}
+                            >
                               <span>{proto}</span>
                               <Check className="w-3 h-3 text-emerald-400" />
+                            </span>
+                          ) : isConfigured ? (
+                            <span
+                              className="inline-flex items-center space-x-1 text-[11px] font-medium text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40"
+                              title={vm.remote_access?.reason || "Configuration pending reachable IP or power"}
+                            >
+                              <span>{proto}</span>
+                              <AlertCircle className="w-3 h-3 text-amber-400" />
                             </span>
                           ) : (
                             <span className="text-[11px] text-slate-500 bg-slate-800 px-2 py-0.5 rounded">
@@ -987,11 +1175,11 @@ export default function App() {
                     {/* Actions Toolbar */}
                     <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
                       {/* CONNECT Button */}
-                      {isRunning && isConfigured ? (
+                      {isRunning && canConnect ? (
                         <button
                           onClick={() => setActiveGuacVm(vm)}
                           className="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold tracking-wide transition shadow-md shadow-emerald-950/50 flex items-center justify-center space-x-1.5"
-                          title={`Connect via ${proto} using Apache Guacamole`}
+                          title={`One-click connect via ${proto} using Apache Guacamole`}
                         >
                           <MonitorPlay className="w-4 h-4" />
                           <span>CONNECT ({proto})</span>
@@ -1003,6 +1191,14 @@ export default function App() {
                       ) : isHostOffline ? (
                         <div className="flex-1 py-2 px-3 rounded-lg bg-rose-950/20 text-rose-500/80 text-xs text-center border border-rose-900/30">
                           Host Offline
+                        </div>
+                      ) : !isRunning ? (
+                        <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
+                          Power on to connect
+                        </div>
+                      ) : !hasIp ? (
+                        <div className="flex-1 py-2 px-3 rounded-lg bg-amber-950/20 text-amber-400/90 text-xs text-center border border-amber-900/30" title="Target VM has no IP reported by VMware Tools.">
+                          Target IP unavailable
                         </div>
                       ) : !isConfigured ? (
                         currentUser.role === "admin" ? (
@@ -1019,13 +1215,9 @@ export default function App() {
                             Remote access not configured
                           </div>
                         )
-                      ) : !isRunning ? (
-                        <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
-                          Power on to connect
-                        </div>
                       ) : (
                         <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
-                          Remote access not configured
+                          {vm.remote_access?.reason || "Unavailable"}
                         </div>
                       )}
 
@@ -1206,6 +1398,129 @@ export default function App() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: FLEET CONNECTION POLICIES (ADMIN ONLY)
+        ========================================================================= */}
+        {activeTab === "profiles" && currentUser.role === "admin" && (
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-white flex items-center space-x-2">
+                  <Sliders className="w-5 h-5 text-emerald-400" />
+                  <span>Fleet Connection Policies & Profiles</span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Reusable connection policies for one-click browser-based remote access (AWS Systems Manager Fleet Manager model).
+                  Authorized users connect immediately without manually entering IP addresses, ports, or credentials.
+                </p>
+              </div>
+              <button
+                onClick={openCreateProfileModal}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-2 shrink-0 shadow-md shadow-emerald-950/50"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Fleet Policy</span>
+              </button>
+            </div>
+
+            {profiles.length === 0 ? (
+              <div className="py-12 text-center bg-slate-950/50 rounded-xl border border-slate-800">
+                <FolderKey className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+                <p className="text-sm text-slate-300 font-medium">No connection policies configured.</p>
+                <p className="text-xs text-slate-500 mt-1">Create a fleet policy to enable automatic one-click remote desktop.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {profiles.map((p) => {
+                  return (
+                    <div
+                      key={p.id}
+                      className="bg-slate-950/80 border border-slate-800 rounded-xl p-5 flex flex-col justify-between space-y-4 hover:border-slate-700 transition"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center space-x-2">
+                            <span className="font-semibold text-white text-sm">{p.name}</span>
+                            {p.is_default && (
+                              <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800 uppercase tracking-wide">
+                                Default {p.os_family} Policy
+                              </span>
+                            )}
+                          </div>
+                          <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold uppercase bg-slate-900 border border-slate-700 text-slate-300">
+                            {p.protocol.toUpperCase()} • {p.port}
+                          </span>
+                        </div>
+
+                        {p.description && (
+                          <p className="text-xs text-slate-400 mb-3">{p.description}</p>
+                        )}
+
+                        <div className="grid grid-cols-2 gap-2 text-xs text-slate-400 py-2 border-y border-slate-800/80">
+                          <div>
+                            <span className="text-slate-500 block text-[10px] uppercase font-semibold">OS Family</span>
+                            <span className="capitalize font-medium text-slate-200">{p.os_family}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block text-[10px] uppercase font-semibold">Default User</span>
+                            <span className="font-mono text-slate-200">{p.username || "—"}</span>
+                          </div>
+                          {p.domain && (
+                            <div>
+                              <span className="text-slate-500 block text-[10px] uppercase font-semibold">Windows Domain</span>
+                              <span className="font-mono text-slate-200">{p.domain}</span>
+                            </div>
+                          )}
+                          <div>
+                            <span className="text-slate-500 block text-[10px] uppercase font-semibold">Security Mode</span>
+                            <span className="uppercase text-slate-200">{p.security || "any"}</span>
+                          </div>
+                          <div className="col-span-2">
+                            <span className="text-slate-500 block text-[10px] uppercase font-semibold">Credentials</span>
+                            <span className="text-xs">
+                              {p.has_password ? (
+                                <span className="text-emerald-400 font-medium flex items-center space-x-1">
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Fleet password configured (encrypted AES-256)</span>
+                                </span>
+                              ) : p.has_private_key ? (
+                                <span className="text-emerald-400 font-medium flex items-center space-x-1">
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>SSH Private Key configured (encrypted AES-256)</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 italic">No saved password (prompted if needed)</span>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end space-x-2 pt-2">
+                        <button
+                          onClick={() => openEditProfileModal(p)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition flex items-center space-x-1.5"
+                        >
+                          <Settings className="w-3.5 h-3.5" />
+                          <span>Edit Policy</span>
+                        </button>
+                        {!p.is_default && (
+                          <button
+                            onClick={() => handleDeleteProfile(p.id, p.name)}
+                            className="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 text-xs font-medium transition border border-rose-800/80"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -1487,7 +1802,7 @@ export default function App() {
       </div>
 
       {/* =========================================================================
-          MODAL: ADMIN REMOTE ACCESS CONFIGURATION
+          MODAL: ADMIN REMOTE ACCESS CONFIGURATION (FLEET POLICY & OVERRIDE)
       ========================================================================= */}
       {configModalVm && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1495,7 +1810,7 @@ export default function App() {
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center space-x-2">
                 <Settings className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base text-white">Configure Apache Guacamole Remote Access</h3>
+                <h3 className="font-bold text-base text-white">Configure Remote Access</h3>
               </div>
               <button
                 onClick={() => setConfigModalVm(null)}
@@ -1505,8 +1820,13 @@ export default function App() {
               </button>
             </div>
 
-            <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 text-xs text-slate-400">
-              Target VM: <strong className="text-slate-200">{configModalVm.name}</strong> ({configModalVm.guest_os})
+            <div className="bg-slate-950 p-3 rounded-lg border border-slate-800/80 text-xs text-slate-400 flex items-center justify-between">
+              <div>
+                Target: <strong className="text-slate-200">{configModalVm.name}</strong> ({configModalVm.guest_os})
+              </div>
+              <div className="font-mono text-emerald-400">
+                {configModalVm.ip_address || "No VM IP"}
+              </div>
             </div>
 
             {configModalMsg && (
@@ -1516,142 +1836,206 @@ export default function App() {
               </div>
             )}
 
-            <div className="space-y-4 text-xs">
-              {/* Protocol selector */}
-              <div>
-                <label className="block font-medium text-slate-300 mb-1.5">Remote Protocol</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(["rdp", "ssh", "vnc"] as const).map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => {
-                        const defaultPort = p === "rdp" ? 3389 : p === "ssh" ? 22 : 5900;
-                        setConfigForm({ ...configForm, protocol: p, port: defaultPort });
-                      }}
-                      className={`py-2 px-3 rounded-lg border font-semibold uppercase text-xs transition ${
-                        configForm.protocol === p
-                          ? "bg-emerald-600/20 border-emerald-500 text-emerald-300"
-                          : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
-                      }`}
-                    >
-                      {p}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            {/* Mode Selector */}
+            <div className="flex rounded-lg bg-slate-950 p-1 border border-slate-800 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setConfigMode("profile")}
+                className={`flex-1 py-1.5 rounded-md transition ${
+                  configMode === "profile"
+                    ? "bg-emerald-600 text-white shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Fleet Connection Policy
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfigMode("custom")}
+                className={`flex-1 py-1.5 rounded-md transition ${
+                  configMode === "custom"
+                    ? "bg-emerald-600 text-white shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Custom VM Override
+              </button>
+            </div>
 
-              {/* Host and Port */}
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block font-medium text-slate-300 mb-1">Target Host or IP</label>
-                  <input
-                    type="text"
-                    required
-                    value={configForm.host || ""}
-                    onChange={(e) => setConfigForm({ ...configForm, host: e.target.value })}
-                    placeholder="192.168.1.50"
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
+            {configMode === "profile" ? (
+              <div className="space-y-4 text-xs">
                 <div>
-                  <label className="block font-medium text-slate-300 mb-1">Port</label>
-                  <input
-                    type="number"
-                    required
-                    value={configForm.port || 3389}
-                    onChange={(e) => setConfigForm({ ...configForm, port: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              </div>
-
-              {/* Username & Domain (for RDP) */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-medium text-slate-300 mb-1">Username</label>
-                  <input
-                    type="text"
-                    value={configForm.username || ""}
-                    onChange={(e) => setConfigForm({ ...configForm, username: e.target.value })}
-                    placeholder="Administrator / user"
+                  <label className="block font-medium text-slate-300 mb-1.5">
+                    Select Fleet Connection Policy
+                  </label>
+                  <select
+                    value={configProfileId ?? ""}
+                    onChange={(e) => setConfigProfileId(e.target.value ? Number(e.target.value) : null)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
-                  />
+                  >
+                    <option value="">(Auto-detect Default Policy for OS)</option>
+                    {profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.os_family.toUpperCase()} - {p.protocol.toUpperCase()}:{p.port})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    Fleet policies allow one-click remote access without configuring host, port, or passwords per VM.
+                  </p>
                 </div>
-                {configForm.protocol === "rdp" && (
-                  <div>
-                    <label className="block font-medium text-slate-300 mb-1">Windows Domain</label>
+
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2 text-xs">
+                  <div className="font-semibold text-slate-300">Connection Resolution:</div>
+                  <div className="text-slate-400">
+                    • <strong>Host:</strong> Uses real VMware Tools IP ({configModalVm.ip_address || "None reported"}).
+                  </div>
+                  <div className="text-slate-400">
+                    • <strong>Protocol:</strong> Automatic based on policy and guest OS.
+                  </div>
+                  <div className="text-slate-400">
+                    • <strong>Credentials:</strong> Securely inherited from the fleet connection profile.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4 text-xs">
+                {/* Protocol selector */}
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1.5">Remote Protocol</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(["rdp", "ssh", "vnc"] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => {
+                          const defaultPort = p === "rdp" ? 3389 : p === "ssh" ? 22 : 5900;
+                          setConfigForm({ ...configForm, protocol: p, port: defaultPort });
+                        }}
+                        className={`py-2 px-3 rounded-lg border font-semibold uppercase text-xs transition ${
+                          configForm.protocol === p
+                            ? "bg-emerald-600/20 border-emerald-500 text-emerald-300"
+                            : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Host and Port */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="block font-medium text-slate-300 mb-1">Target Host or IP</label>
                     <input
                       type="text"
-                      value={configForm.domain || ""}
-                      onChange={(e) => setConfigForm({ ...configForm, domain: e.target.value })}
-                      placeholder="Optional domain / WORKGROUP"
+                      required
+                      value={configForm.host || ""}
+                      onChange={(e) => setConfigForm({ ...configForm, host: e.target.value })}
+                      placeholder={configModalVm.ip_address || "192.168.1.50"}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Port</label>
+                    <input
+                      type="number"
+                      required
+                      value={configForm.port || 3389}
+                      onChange={(e) => setConfigForm({ ...configForm, port: Number(e.target.value) })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Username & Domain (for RDP) */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Username</label>
+                    <input
+                      type="text"
+                      value={configForm.username || ""}
+                      onChange={(e) => setConfigForm({ ...configForm, username: e.target.value })}
+                      placeholder="Administrator / user"
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
                     />
                   </div>
-                )}
-              </div>
-
-              {configForm.protocol === "rdp" && (
-                <div>
-                  <label className="block font-medium text-slate-300 mb-1">RDP Security Mode</label>
-                  <select
-                    value={configForm.security || "any"}
-                    onChange={(e) => setConfigForm({ ...configForm, security: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="any">Any (Auto-Negotiate - Recommended)</option>
-                    <option value="nla">NLA (Network Level Authentication)</option>
-                    <option value="tls">TLS Security</option>
-                    <option value="rdp">Standard RDP Encryption</option>
-                  </select>
+                  {configForm.protocol === "rdp" && (
+                    <div>
+                      <label className="block font-medium text-slate-300 mb-1">Windows Domain</label>
+                      <input
+                        type="text"
+                        value={configForm.domain || ""}
+                        onChange={(e) => setConfigForm({ ...configForm, domain: e.target.value })}
+                        placeholder="Optional domain / WORKGROUP"
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  )}
                 </div>
-              )}
 
-              {/* Password */}
-              <div>
-                <label className="block font-medium text-slate-300 mb-1">
-                  Password {configForm.has_password && <span className="text-emerald-400 font-normal">(Encrypted password currently saved)</span>}
-                </label>
-                <input
-                  type="password"
-                  value={configPassword}
-                  onChange={(e) => setConfigPassword(e.target.value)}
-                  placeholder={configForm.has_password ? "Leave blank to keep existing password" : "Enter remote machine password"}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
-                />
-              </div>
+                {configForm.protocol === "rdp" && (
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">RDP Security Mode</label>
+                    <select
+                      value={configForm.security || "any"}
+                      onChange={(e) => setConfigForm({ ...configForm, security: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="any">Any (Auto-Negotiate - Recommended)</option>
+                      <option value="nla">NLA (Network Level Authentication)</option>
+                      <option value="tls">TLS Security</option>
+                      <option value="rdp">Standard RDP Encryption</option>
+                    </select>
+                  </div>
+                )}
 
-              {/* SSH Private Key (for SSH) */}
-              {configForm.protocol === "ssh" && (
+                {/* Password */}
                 <div>
                   <label className="block font-medium text-slate-300 mb-1">
-                    SSH Private Key (Optional for Key Auth)
+                    Password {configForm.has_password && <span className="text-emerald-400 font-normal">(Encrypted password currently saved)</span>}
                   </label>
-                  <textarea
-                    rows={3}
-                    value={configPrivateKey}
-                    onChange={(e) => setConfigPrivateKey(e.target.value)}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                  <input
+                    type="password"
+                    value={configPassword}
+                    onChange={(e) => setConfigPassword(e.target.value)}
+                    placeholder={configForm.has_password ? "Leave blank to keep existing password" : "Enter remote machine password"}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>
-              )}
 
-              {/* Ignore Cert checkbox */}
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="ignore_cert"
-                  checked={configForm.ignore_cert ?? true}
-                  onChange={(e) => setConfigForm({ ...configForm, ignore_cert: e.target.checked })}
-                  className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
-                />
-                <label htmlFor="ignore_cert" className="text-slate-400 text-xs">
-                  Ignore self-signed SSL/TLS certificates (Recommended for internal VMs)
-                </label>
+                {/* SSH Private Key (for SSH) */}
+                {configForm.protocol === "ssh" && (
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">
+                      SSH Private Key (Optional for Key Auth)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={configPrivateKey}
+                      onChange={(e) => setConfigPrivateKey(e.target.value)}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                )}
+
+                {/* Ignore Cert checkbox */}
+                <div className="flex items-center space-x-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="ignore_cert"
+                    checked={configForm.ignore_cert ?? true}
+                    onChange={(e) => setConfigForm({ ...configForm, ignore_cert: e.target.checked })}
+                    className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="ignore_cert" className="text-slate-400 text-xs">
+                    Ignore self-signed SSL/TLS certificates (Recommended for internal VMs)
+                  </label>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="pt-3 border-t border-slate-800 flex justify-end space-x-3">
               <button
@@ -1669,6 +2053,233 @@ export default function App() {
               >
                 {configSaveLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
                 <span>Save Configuration</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: ADMIN FLEET CONNECTION PROFILE CREATE / EDIT
+      ========================================================================= */}
+      {profileModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center space-x-2">
+                <Sliders className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-bold text-base text-white">
+                  {editingProfile ? "Edit Fleet Connection Policy" : "New Fleet Connection Policy"}
+                </h3>
+              </div>
+              <button
+                onClick={() => setProfileModalOpen(false)}
+                className="text-slate-500 hover:text-slate-300"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {profileModalMsg && (
+              <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-500/30 text-rose-300 text-xs flex items-center space-x-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>{profileModalMsg}</span>
+              </div>
+            )}
+
+            <div className="space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block font-medium text-slate-300 mb-1">Policy Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={profileForm.name}
+                    onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
+                    placeholder="e.g. Windows Production Fleet Policy"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block font-medium text-slate-300 mb-1">Description (Optional)</label>
+                  <input
+                    type="text"
+                    value={profileForm.description}
+                    onChange={(e) => setProfileForm({ ...profileForm, description: e.target.value })}
+                    placeholder="Fleet-wide one-click connection policy"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Target OS</label>
+                  <select
+                    value={profileForm.os_family}
+                    onChange={(e) => {
+                      const os = e.target.value;
+                      const proto = os === "windows" ? "rdp" : "ssh";
+                      const port = os === "windows" ? 3389 : 22;
+                      const user = os === "windows" ? "Administrator" : "ubuntu";
+                      setProfileForm({ ...profileForm, os_family: os, protocol: proto, port, username: user });
+                    }}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="windows">Windows</option>
+                    <option value="linux">Linux</option>
+                    <option value="all">Universal / All</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Protocol</label>
+                  <select
+                    value={profileForm.protocol}
+                    onChange={(e) => {
+                      const p = e.target.value;
+                      const port = p === "rdp" ? 3389 : p === "ssh" ? 22 : 5900;
+                      setProfileForm({ ...profileForm, protocol: p, port });
+                    }}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500 uppercase"
+                  >
+                    <option value="rdp">RDP</option>
+                    <option value="ssh">SSH</option>
+                    <option value="vnc">VNC</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Default Port</label>
+                  <input
+                    type="number"
+                    required
+                    value={profileForm.port}
+                    onChange={(e) => setProfileForm({ ...profileForm, port: Number(e.target.value) })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">Default Username</label>
+                  <input
+                    type="text"
+                    value={profileForm.username}
+                    onChange={(e) => setProfileForm({ ...profileForm, username: e.target.value })}
+                    placeholder="Administrator"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                {profileForm.protocol === "rdp" && (
+                  <div>
+                    <label className="block font-medium text-slate-300 mb-1">Windows Domain</label>
+                    <input
+                      type="text"
+                      value={profileForm.domain}
+                      onChange={(e) => setProfileForm({ ...profileForm, domain: e.target.value })}
+                      placeholder="e.g. vclass.local"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {profileForm.protocol === "rdp" && (
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">RDP Security Mode</label>
+                  <select
+                    value={profileForm.security}
+                    onChange={(e) => setProfileForm({ ...profileForm, security: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="any">Any (Auto-Negotiate - Recommended)</option>
+                    <option value="nla">NLA (Network Level Authentication)</option>
+                    <option value="tls">TLS Security</option>
+                    <option value="rdp">Standard RDP Encryption</option>
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="block font-medium text-slate-300 mb-1">
+                  Fleet Password{" "}
+                  {editingProfile?.has_password && (
+                    <span className="text-emerald-400 font-normal">(Encrypted password currently saved)</span>
+                  )}
+                </label>
+                <input
+                  type="password"
+                  value={profilePassword}
+                  onChange={(e) => setProfilePassword(e.target.value)}
+                  placeholder={
+                    editingProfile?.has_password
+                      ? "Leave blank to keep existing password"
+                      : "Enter fleet password (encrypted AES-256 at rest)"
+                  }
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              {profileForm.protocol === "ssh" && (
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">
+                    SSH Private Key (Optional)
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={profilePrivateKey}
+                    onChange={(e) => setProfilePrivateKey(e.target.value)}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white font-mono text-xs focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-1">
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="prof_default"
+                    checked={profileForm.is_default}
+                    onChange={(e) => setProfileForm({ ...profileForm, is_default: e.target.checked })}
+                    className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="prof_default" className="text-slate-300 text-xs font-medium">
+                    Set as Default Fleet Policy for {profileForm.os_family}
+                  </label>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="prof_ignore_cert"
+                    checked={profileForm.ignore_cert}
+                    onChange={(e) => setProfileForm({ ...profileForm, ignore_cert: e.target.checked })}
+                    className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+                  />
+                  <label htmlFor="prof_ignore_cert" className="text-slate-400 text-xs">
+                    Ignore self-signed SSL/TLS certs
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 flex justify-end space-x-3">
+              <button
+                type="button"
+                onClick={() => setProfileModalOpen(false)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveProfile}
+                disabled={profileSaveLoading}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center space-x-2 disabled:opacity-50"
+              >
+                {profileSaveLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                <span>Save Policy</span>
               </button>
             </div>
           </div>
