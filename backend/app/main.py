@@ -506,12 +506,12 @@ async def guac_websocket_tunnel(
             )
 
         if not vm:
-            await websocket.close(code=4404, reason="VM not found or not assigned to your account")
+            await websocket.close(code=4404, reason=f"Virtual machine #{vm_id} not found or not assigned to your account")
             return
 
         # 3. Power state check
         if vm.power_state != "on":
-            await websocket.close(code=4400, reason=f"VM '{vm.name}' is powered off. Please power it on first.")
+            await websocket.close(code=4400, reason=f"VM '{vm.name}' is currently powered off. Please power it on first.")
             return
 
         # 4. Remote configuration check
@@ -523,13 +523,13 @@ async def guac_websocket_tunnel(
             )
             return
 
-        # 5. Extract decrypted credentials safely server-side
+        # 5. Extract target host and decrypted credentials safely server-side
         protocol = cfg.protocol.lower()
         target_host = cfg.host.strip() or vm.ip_address.strip()
         if not target_host:
             await websocket.close(
                 code=4400,
-                reason="Target host address is not configured and VM has no reported IP address."
+                reason=f"Target host address is not configured for VM '{vm.name}', and no IP was reported by VMware Tools."
             )
             return
 
@@ -599,12 +599,41 @@ async def guac_websocket_tunnel(
         db.close()
         return
 
+    # Accept client WebSocket connection with subprotocol guacamole once validated
+    client_subprotocols = websocket.scope.get("subprotocols", [])
+    selected_subprotocol = "guacamole" if "guacamole" in client_subprotocols else (client_subprotocols[0] if client_subprotocols else None)
+    await websocket.accept(subprotocol=selected_subprotocol)
+
+    async def abort_with_diagnostic(message: str, code: str = "514"):
+        log.warning("Guacamole session rejected: %s", message)
+        try:
+            await websocket.send_text(encode_instruction("error", message, code))
+            await asyncio.sleep(0.05)
+            await websocket.close(code=1000)
+        except Exception:
+            pass
+        if session_log_id:
+            s_log = db.get(m.RemoteSessionLog, session_log_id)
+            if s_log:
+                s_log.status = "failed"
+                s_log.ended_at = m.now()
+                db.commit()
+        db.close()
+
     # 6. Connect to guacd daemon and complete handshake
     guac_client = GuacdClient(host=S.guacd_host, port=S.guacd_port, timeout=S.guacd_timeout)
-    connect_start = time.time()
 
     try:
         await guac_client.connect()
+    except Exception as exc:
+        log.error("Failed to connect to guacd at %s:%s: %s", S.guacd_host, S.guacd_port, exc)
+        await abort_with_diagnostic(
+            f"Apache Guacamole proxy service (guacd at {S.guacd_host}:{S.guacd_port}) is unreachable.",
+            "514"
+        )
+        return
+
+    try:
         await guac_client.handshake(
             protocol=protocol,
             params=params,
@@ -613,32 +642,22 @@ async def guac_websocket_tunnel(
             dpi=dpi,
         )
     except GuacamoleError as ge:
-        log.warning("guacd handshake failed for vm=%s: %s", vm_id, ge)
-        await websocket.close(code=4502, reason=str(ge))
-        if session_log_id:
-            s_log = db.get(m.RemoteSessionLog, session_log_id)
-            if s_log:
-                s_log.status = "failed"
-                s_log.ended_at = m.now()
-                db.commit()
-        db.close()
+        err_text = str(ge)
+        log.warning("guacd handshake failed for vm=%s (%s): %s", vm_id, protocol, err_text)
+        if "timeout" in err_text.lower():
+            friendly = f"Connection to {target_host}:{target_port} timed out. Verify the VM is powered on and {protocol.upper()} port is reachable."
+        elif "refused" in err_text.lower() or "reset" in err_text.lower():
+            friendly = f"Connection refused on {target_host}:{target_port}. Verify that the {protocol.upper()} service is running."
+        elif "auth" in err_text.lower() or "credential" in err_text.lower():
+            friendly = f"Authentication rejected by target VM {target_host}. Verify the username and password in Remote Access configuration."
+        else:
+            friendly = f"Guacamole remote session failed: {err_text}"
+        await abort_with_diagnostic(friendly, "797")
         return
     except Exception as exc:
         log.exception("Unexpected error during guacd handshake: %s", exc)
-        await websocket.close(code=4500, reason="Guacamole service connection failed.")
-        if session_log_id:
-            s_log = db.get(m.RemoteSessionLog, session_log_id)
-            if s_log:
-                s_log.status = "failed"
-                s_log.ended_at = m.now()
-                db.commit()
-        db.close()
+        await abort_with_diagnostic("Guacamole remote session negotiation failed.", "514")
         return
-
-    # Accept client WebSocket connection with subprotocol guacamole
-    client_subprotocols = websocket.scope.get("subprotocols", [])
-    selected_subprotocol = "guacamole" if "guacamole" in client_subprotocols else (client_subprotocols[0] if client_subprotocols else None)
-    await websocket.accept(subprotocol=selected_subprotocol)
 
     # Inform client that connection is ready
     ready_instr = encode_instruction("ready", guac_client.connection_id or "guac-session")
@@ -987,14 +1006,17 @@ def a_get_remote_config(vm_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Virtual machine not found")
     cfg = v.remote_config
     if not cfg:
+        is_win = "windows" in (v.guest_os or "").lower() or "win" in (v.name or "").lower()
+        default_proto = "rdp" if is_win else "ssh"
+        default_port = 3389 if is_win else 22
         return {
             "configured": False,
             "vm_id": v.id,
             "vm_name": v.name,
-            "protocol": "rdp",
+            "protocol": default_proto,
             "host": v.ip_address or "",
-            "port": 3389,
-            "username": "",
+            "port": default_port,
+            "username": "Administrator" if is_win else "",
             "has_password": False,
             "has_private_key": False,
             "domain": "",
@@ -1007,7 +1029,7 @@ def a_get_remote_config(vm_id: int, db: Session = Depends(get_db)):
         "vm_id": v.id,
         "vm_name": v.name,
         "protocol": cfg.protocol,
-        "host": cfg.host,
+        "host": cfg.host or v.ip_address or "",
         "port": cfg.port,
         "username": cfg.username,
         "has_password": bool(cfg.password_enc),

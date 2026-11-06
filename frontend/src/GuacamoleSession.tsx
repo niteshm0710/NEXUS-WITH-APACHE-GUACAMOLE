@@ -36,6 +36,7 @@ export const GuacamoleSession: React.FC<GuacamoleSessionProps> = ({ vm, onClose 
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [scaleMode, setScaleMode] = useState<"fit" | "native">("fit");
   const [showToolbar, setShowToolbar] = useState<boolean>(true);
+  const [retryNonce, setRetryNonce] = useState<number>(0);
 
   const protocol = vm.remote_access?.protocol?.toUpperCase() || "RDP";
 
@@ -119,6 +120,22 @@ export const GuacamoleSession: React.FC<GuacamoleSessionProps> = ({ vm, onClose 
       const tunnel = new Guacamole.WebSocketTunnel(wsUrl);
       tunnelRef.current = tunnel;
 
+      tunnel.onerror = (status: any) => {
+        let msg = status?.message;
+        if (!msg) {
+          switch (status?.code) {
+            case 0x0206: msg = "Authentication failed: invalid username or password."; break;
+            case 0x0207: msg = "You are not authorized to access this virtual machine."; break;
+            case 0x0308: msg = "Target host or IP address not found."; break;
+            case 0x031d: msg = "Target VM is unreachable. Port may be closed or firewalled."; break;
+            case 0x031f: msg = "Connection timed out waiting for target VM response."; break;
+            default: msg = "Guacamole tunnel error: verify target VM host, port, and credentials."; break;
+          }
+        }
+        setConnectionState("error");
+        setErrorMessage(msg);
+      };
+
       const client = new Guacamole.Client(tunnel);
       clientRef.current = client;
 
@@ -193,7 +210,7 @@ export const GuacamoleSession: React.FC<GuacamoleSessionProps> = ({ vm, onClose 
       }
       disconnectSession();
     };
-  }, [vm.id, disconnectSession]);
+  }, [vm.id, retryNonce, disconnectSession]);
 
   return (
     <div
@@ -338,6 +355,16 @@ export const GuacamoleSession: React.FC<GuacamoleSessionProps> = ({ vm, onClose 
               </p>
             </div>
             <div className="flex space-x-3 pt-2">
+              <button
+                onClick={() => {
+                  disconnectSession();
+                  setRetryNonce((n) => n + 1);
+                }}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition flex items-center space-x-1.5"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>Retry Connection</span>
+              </button>
               <button
                 onClick={() => {
                   disconnectSession();

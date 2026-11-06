@@ -956,10 +956,10 @@ export default function App() {
 
                       {/* Network & Host details */}
                       <div className="space-y-1.5 text-xs text-slate-400 mb-4">
-                        <div className="flex justify-between">
-                          <span className="text-slate-500">IP Address:</span>
-                          <span className="font-mono text-slate-300 font-medium">
-                            {vm.ip_address || "None reported"}
+                        <div className="flex justify-between items-start">
+                          <span className="text-slate-500 shrink-0">IP Address:</span>
+                          <span className={`font-mono text-right text-xs ${vm.ip_address ? "text-slate-300 font-medium" : "text-amber-400/90 text-[11px] max-w-[210px] leading-tight"}`}>
+                            {vm.ip_address || "IP address unavailable — VMware Tools may not be reporting network information."}
                           </span>
                         </div>
                         <div className="flex justify-between">
@@ -1004,6 +1004,21 @@ export default function App() {
                         <div className="flex-1 py-2 px-3 rounded-lg bg-rose-950/20 text-rose-500/80 text-xs text-center border border-rose-900/30">
                           Host Offline
                         </div>
+                      ) : !isConfigured ? (
+                        currentUser.role === "admin" ? (
+                          <button
+                            onClick={() => openRemoteConfigModal(vm)}
+                            className="flex-1 py-2 px-3 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 text-xs font-semibold text-center border border-slate-700 transition flex items-center justify-center space-x-1.5"
+                            title="Configure Remote Access Protocol & Credentials"
+                          >
+                            <Settings className="w-3.5 h-3.5" />
+                            <span>Configure Remote Access</span>
+                          </button>
+                        ) : (
+                          <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
+                            Remote access not configured
+                          </div>
+                        )
                       ) : !isRunning ? (
                         <div className="flex-1 py-2 px-3 rounded-lg bg-slate-800/50 text-slate-500 text-xs text-center border border-slate-800">
                           Power on to connect
@@ -1576,6 +1591,22 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {configForm.protocol === "rdp" && (
+                <div>
+                  <label className="block font-medium text-slate-300 mb-1">RDP Security Mode</label>
+                  <select
+                    value={configForm.security || "any"}
+                    onChange={(e) => setConfigForm({ ...configForm, security: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="any">Any (Auto-Negotiate - Recommended)</option>
+                    <option value="nla">NLA (Network Level Authentication)</option>
+                    <option value="tls">TLS Security</option>
+                    <option value="rdp">Standard RDP Encryption</option>
+                  </select>
+                </div>
+              )}
 
               {/* Password */}
               <div>

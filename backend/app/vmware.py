@@ -26,6 +26,64 @@ class VMwareError(Exception):
     """Clean, user-safe error message from VMware operations."""
     pass
 
+def extract_best_ipv4(vm) -> str:
+    """Extract best IPv4 address for remote access from pyVmomi VM object.
+    Ignores loopback, link-local, and unspecified addresses.
+    Prioritizes real routable network addresses reported by VMware Tools.
+    """
+    import ipaddress
+
+    candidates: list[tuple[int, str]] = []
+
+    def add_candidate(addr_str: str, priority: int):
+        if not addr_str:
+            return
+        addr_str = str(addr_str).strip()
+        try:
+            ip = ipaddress.ip_address(addr_str)
+            if ip.version == 4:
+                # Discard loopback (127.0.0.0/8), link-local (169.254.0.0/16), and unspecified (0.0.0.0)
+                if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                    return
+                # Docker bridge / internal container subnets like 172.17.0.1 or 172.18.0.1
+                # should have lower priority than management/LAN subnets
+                weight = priority
+                if addr_str.startswith("172.17.") or addr_str.startswith("172.18."):
+                    weight += 50
+                elif addr_str.startswith("192.168.0."):
+                    weight -= 20
+                candidates.append((weight, str(ip)))
+        except ValueError:
+            pass
+
+    guest = getattr(vm, "guest", None)
+    summary = getattr(vm, "summary", None)
+    sg = getattr(summary, "guest", None) if summary else None
+
+    # 1. Check guest.net NIC list (all configured network adapters)
+    if guest and getattr(guest, "net", None):
+        for nic in guest.net:
+            for ip in getattr(nic, "ipAddress", []) or []:
+                add_candidate(ip, 10)
+            ip_cfg = getattr(nic, "ipConfig", None)
+            if ip_cfg and getattr(ip_cfg, "ipAddress", None):
+                for ip_obj in ip_cfg.ipAddress:
+                    add_candidate(getattr(ip_obj, "ipAddress", None), 12)
+
+    # 2. Check primary guest.ipAddress
+    if guest and getattr(guest, "ipAddress", None):
+        add_candidate(guest.ipAddress, 5)
+
+    # 3. Check summary.guest.ipAddress
+    if sg and getattr(sg, "ipAddress", None):
+        add_candidate(sg.ipAddress, 6)
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
 class PyVmomiProvider:
     def __init__(self, host: str, user: str, pwd: str, verify_tls: bool = True):
         self.host = host.strip() if host else ""
@@ -160,9 +218,7 @@ class PyVmomiProvider:
                             committed = getattr(summary.storage, "committed", 0) or 0
                             storage_gb = round(committed / (1024 ** 3))
 
-                        ip_address = ""
-                        if guest and getattr(guest, "ipAddress", None):
-                            ip_address = str(guest.ipAddress).strip()
+                        ip_address = extract_best_ipv4(vm)
 
                         esxi_host = ""
                         host_obj = getattr(runtime, "host", None) if runtime else None
