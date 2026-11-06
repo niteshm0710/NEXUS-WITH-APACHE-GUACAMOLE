@@ -135,7 +135,12 @@ class GuacdClient:
         await self.send_instruction("image", "image/png", "image/jpeg", "image/webp")
 
         # 7. Send connect instruction with arguments matching the order received from guacd
-        param_values = [params.get(arg_name, "") for arg_name in arg_names]
+        param_values = []
+        for arg_name in arg_names:
+            if arg_name.startswith("VERSION_"):
+                param_values.append(arg_name)
+            else:
+                param_values.append(params.get(arg_name, ""))
         await self.send_instruction("connect", *param_values)
 
         # 8. Receive ready instruction containing connection id
